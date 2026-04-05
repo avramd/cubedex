@@ -26,7 +26,7 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
-import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled, setYellowUpEnabled } from './functions';
+import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled, setDWhiteReferenceEnabled } from './functions';
 
 const SOLVED_STATE = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
 
@@ -640,7 +640,7 @@ async function handleMoveEvent(event: SmartCubeEvent) {
         const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
         const sliceMove = getSliceForPair(bufferedMove, moveStr);
         if (sliceMove) {
-          twistyTracker.experimentalAddMove(whiteOnBottomEnabled ? remapMoveZ2(bufferedMove) : bufferedMove, { cancel: false });
+          twistyTracker.experimentalAddMove(dWhiteReferenceEnabled ? remapMoveZ2(bufferedMove) : bufferedMove, { cancel: false });
           return processMoveEvent(event, sliceMove, bufferedEvent);
         } else {
           await processMoveEvent(bufferedEvent);
@@ -674,9 +674,9 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
 
-    const logicalMove = whiteOnBottomEnabled ? remapMoveZ2(event.move) : event.move;
+    const logicalMove = dWhiteReferenceEnabled ? remapMoveZ2(event.move) : event.move;
     if (visualMove) {
-      const logicalVisualMove = whiteOnBottomEnabled ? remapMoveZ2(visualMove) : visualMove;
+      const logicalVisualMove = dWhiteReferenceEnabled ? remapMoveZ2(visualMove) : visualMove;
       updateSliceOrientation(logicalVisualMove);
       twistyPlayer.experimentalAddMove(logicalVisualMove, { cancel: false });
     } else {
@@ -930,6 +930,7 @@ function handleFaceletsEvent(event: SmartCubeEvent) {
       twistyTracker.alg = '';
     }
     applyWhiteOnBottomState({ persist: false });
+    applyDWhiteReferenceState({ persist: false });
     cubeStateInitialized = true;
     console.log("Initial cube state is applied successfully", event.facelets);
   }
@@ -1557,9 +1558,10 @@ $('#scramble-to').on('click', () => {
       resetAlg();
       $('#alg-scramble').show();
       $('#alg-scramble').text(scramble);
-      // draw real cube state (mirror tracker; applyWhiteOnBottomState applies z2 + alg together)
+      // draw real cube state (mirror tracker; apply z2 setup alg + sync together)
       if (conn) {
         applyWhiteOnBottomState({ persist: false });
+        applyDWhiteReferenceState({ persist: false });
       }
     } else {
       scrambleMode = false;
@@ -1702,6 +1704,16 @@ smartcubeShowAllBleToggle.addEventListener('change', () => {
   );
 });
 
+// These variables must be declared before $(function(){}) to avoid TDZ.
+// jQuery fires the DOM-ready callback synchronously when DOM is already ready (deferred module scripts).
+let whiteOnBottomEnabled: boolean = false;
+const whiteOnBottomToggle = document.getElementById('white-on-bottom-toggle') as HTMLInputElement;
+const whiteOnBottomHint = document.getElementById('white-on-bottom-hint') as HTMLElement | null;
+let dWhiteReferenceEnabled: boolean = false;
+const dWhiteReferenceToggle = document.getElementById('d-white-reference-toggle') as HTMLInputElement;
+const dWhiteReferenceQuickToggle = document.getElementById('quick-d-white-reference') as HTMLInputElement;
+const dWhiteReferenceHint = document.getElementById('d-white-reference-hint') as HTMLElement | null;
+
 $(function() {
   renameOldKeys();
   loadConfiguration();
@@ -1744,18 +1756,26 @@ function loadConfiguration() {
   }
 
   const whiteOnBottom = localStorage.getItem('whiteOnBottom');
-  if (whiteOnBottom) {
-    whiteOnBottomEnabled = whiteOnBottom === 'true';
-  } else {
-    whiteOnBottomEnabled = false;
-  }
-  // Enforce dependency: white-on-bottom requires full stickering.
-  if (!fullStickeringEnabled && whiteOnBottomEnabled) {
-    whiteOnBottomEnabled = false;
+  whiteOnBottomEnabled = whiteOnBottom === 'true' && fullStickeringEnabled;
+  if (!fullStickeringEnabled && whiteOnBottom === 'true') {
     localStorage.setItem('whiteOnBottom', 'false');
   }
+
+  const savedDWhiteRef = localStorage.getItem('dWhiteReference');
+  dWhiteReferenceEnabled = savedDWhiteRef === 'true' && fullStickeringEnabled;
+  if (!fullStickeringEnabled && savedDWhiteRef === 'true') {
+    localStorage.setItem('dWhiteReference', 'false');
+  }
+  // Enforce mutual exclusion on load.
+  if (whiteOnBottomEnabled && dWhiteReferenceEnabled) {
+    dWhiteReferenceEnabled = false;
+    localStorage.setItem('dWhiteReference', 'false');
+  }
+
   applyWhiteOnBottomState({ persist: false });
+  applyDWhiteReferenceState({ persist: false });
   updateWhiteOnBottomAvailability();
+  updateDWhiteReferenceAvailability();
 
   const backview = localStorage.getItem('backview');
   if (backview) {
@@ -1878,15 +1898,17 @@ fullStickeringToggle.addEventListener('change', () => {
     setStickering(category);
   }
   if (!fullStickeringEnabled) {
-    // Enforce dependency: if full stickering is disabled, white-on-bottom must be off.
+    // Enforce dependency: if full stickering is disabled, white-on-bottom and D=White must be off.
     setWhiteOnBottomEnabled(false, { persist: true });
+    setDWhiteRefEnabled(false, { persist: true });
   }
   updateWhiteOnBottomAvailability();
+  updateDWhiteReferenceAvailability();
 });
 
-let whiteOnBottomEnabled: boolean = false;
-const whiteOnBottomToggle = document.getElementById('white-on-bottom-toggle') as HTMLInputElement;
-const whiteOnBottomHint = document.getElementById('white-on-bottom-hint') as HTMLElement | null;
+function applyZ2SetupAlg() {
+  twistyPlayer.experimentalSetupAlg = (whiteOnBottomEnabled || dWhiteReferenceEnabled) ? 'z2' : '';
+}
 
 function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   const persist = options?.persist ?? false;
@@ -1894,8 +1916,7 @@ function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   if (persist) {
     localStorage.setItem('whiteOnBottom', whiteOnBottomEnabled.toString());
   }
-  setYellowUpEnabled(whiteOnBottomEnabled);
-  twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
+  applyZ2SetupAlg();
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
       twistyPlayer.alg = alg.toString();
@@ -1913,6 +1934,11 @@ function updateWhiteOnBottomAvailability() {
 
 function setWhiteOnBottomEnabled(enabled: boolean, options?: { persist?: boolean }) {
   whiteOnBottomEnabled = enabled;
+  // Mutual exclusion: turning on white-on-bottom disables D=White Reference.
+  if (enabled && dWhiteReferenceEnabled) {
+    dWhiteReferenceEnabled = false;
+    applyDWhiteReferenceState({ persist: true });
+  }
   applyWhiteOnBottomState({ persist: options?.persist ?? false });
 }
 
@@ -1925,6 +1951,50 @@ whiteOnBottomToggle.addEventListener('change', () => {
   }
   setWhiteOnBottomEnabled(whiteOnBottomToggle.checked, { persist: true });
   updateWhiteOnBottomAvailability();
+});
+
+// D=White Reference: full yellow-up reference frame (visual z2 + move remapping).
+// (variable declarations are hoisted above $(function(){}) — see above)
+
+function applyDWhiteReferenceState(options?: { persist?: boolean }) {
+  if (dWhiteReferenceToggle) dWhiteReferenceToggle.checked = dWhiteReferenceEnabled;
+  if (dWhiteReferenceQuickToggle) dWhiteReferenceQuickToggle.checked = dWhiteReferenceEnabled;
+  if (options?.persist) localStorage.setItem('dWhiteReference', dWhiteReferenceEnabled.toString());
+  setDWhiteReferenceEnabled(dWhiteReferenceEnabled);
+  applyZ2SetupAlg();
+  if (conn) {
+    void twistyTracker.experimentalGet.alg().then((alg) => {
+      twistyPlayer.alg = alg.toString();
+    }).catch((err) => console.warn('twisty alg sync failed', err));
+  }
+}
+
+function updateDWhiteReferenceAvailability() {
+  const available = fullStickeringEnabled;
+  if (dWhiteReferenceToggle) dWhiteReferenceToggle.disabled = !available;
+  if (dWhiteReferenceHint) {
+    dWhiteReferenceHint.classList.toggle('hidden', available);
+  }
+}
+
+function setDWhiteRefEnabled(enabled: boolean, options?: { persist?: boolean }) {
+  dWhiteReferenceEnabled = enabled;
+  // Mutual exclusion: turning on D=White disables white-on-bottom.
+  if (enabled && whiteOnBottomEnabled) {
+    whiteOnBottomEnabled = false;
+    applyWhiteOnBottomState({ persist: true });
+  }
+  applyDWhiteReferenceState({ persist: options?.persist ?? false });
+}
+
+dWhiteReferenceToggle?.addEventListener('change', () => {
+  const enabled = dWhiteReferenceToggle.checked;
+  if (enabled && !fullStickeringEnabled) {
+    fullStickeringToggle.checked = true;
+    fullStickeringToggle.dispatchEvent(new Event('change'));
+  }
+  setDWhiteRefEnabled(dWhiteReferenceToggle.checked, { persist: true });
+  updateDWhiteReferenceAvailability();
 });
 
 var flashingIndicatorEnabled: boolean = true;
@@ -2012,7 +2082,7 @@ function initQuickBar() {
   setupQuickToggleSync('quick-control-panel',       'control-panel-toggle');
   setupQuickToggleSync('quick-hint-facelets',       'hintFacelets-toggle');
   setupQuickToggleSync('quick-full-stickering',     'full-stickering-toggle');
-  setupQuickToggleSync('quick-white-on-bottom',     'white-on-bottom-toggle');
+  setupQuickToggleSync('quick-d-white-reference',   'd-white-reference-toggle');
   setupQuickToggleSync('quick-flashing-indicator',  'flashing-indicator-toggle');
   setupQuickToggleSync('quick-show-alg-name',       'show-alg-name-toggle');
   setupQuickToggleSync('quick-always-scramble-to',  'always-scramble-to-toggle');
