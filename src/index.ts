@@ -26,7 +26,7 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
-import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled } from './functions';
+import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled, setDWhiteReferenceEnabled } from './functions';
 import { NetPeer, NetMessage } from './network';
 
 const SOLVED_STATE = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
@@ -103,6 +103,66 @@ let cubeSizePx: number = 400;
 
 const containerEl = document.getElementById('container') as HTMLElement | null;
 const cubeCellEl = document.getElementById('cube') as HTMLElement | null;
+
+// Arcball drag overlay — sits on top of the cube, handles orientation adjustment.
+// Project a normalised 2D point (nx, ny) in [-∞,+∞] onto the virtual unit sphere.
+// Points inside the unit circle map to the front hemisphere; points outside map to the rim (z=0).
+// This gives the classic "trackball" behaviour: dragging near the centre gives pure rotation
+// around the screen-space axis perpendicular to the drag; dragging near the edge mixes in a
+// roll component, because the lever arm from the centre is no longer zero on that axis.
+function arcballProject(nx: number, ny: number): THREE.Vector3 {
+  const r2 = nx * nx + ny * ny;
+  if (r2 <= 1.0) return new THREE.Vector3(nx, ny, Math.sqrt(1.0 - r2));
+  const r = Math.sqrt(r2);
+  return new THREE.Vector3(nx / r, ny / r, 0);
+}
+
+if (cubeCellEl) {
+  cubeCellEl.style.position = 'relative';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:absolute;inset:0;cursor:grab;touch-action:none;z-index:10;';
+  cubeCellEl.appendChild(overlay);
+
+  let dragAnchor: THREE.Vector3 | null = null;
+
+  function pointerToArcball(e: PointerEvent): THREE.Vector3 {
+    const rect = overlay.getBoundingClientRect();
+    const radius = Math.min(rect.width, rect.height) / 2;
+    const nx = (e.clientX - rect.left - rect.width / 2) / radius;
+    const ny = -((e.clientY - rect.top - rect.height / 2) / radius);
+    return arcballProject(nx, ny);
+  }
+
+  overlay.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    dragAnchor = pointerToArcball(e);
+    overlay.setPointerCapture(e.pointerId);
+    overlay.style.cursor = 'grabbing';
+  });
+
+  overlay.addEventListener('pointermove', (e: PointerEvent) => {
+    if (!dragAnchor || !(e.buttons & 1)) return;
+    const end = pointerToArcball(e);
+    const axis = new THREE.Vector3().crossVectors(dragAnchor, end);
+    if (axis.lengthSq() < 1e-14) { dragAnchor = end; return; }
+    const angle = Math.acos(Math.max(-1, Math.min(1, dragAnchor.dot(end))));
+    const delta = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
+    orientAdjust.premultiply(delta);
+    dragAnchor = end;
+    try { localStorage.setItem(ORIENT_ADJUST_KEY, JSON.stringify(orientAdjust)); } catch { /**/ }
+  });
+
+  overlay.addEventListener('pointerup', (e: PointerEvent) => {
+    overlay.releasePointerCapture(e.pointerId);
+    overlay.style.cursor = 'grab';
+    dragAnchor = null;
+  });
+
+  overlay.addEventListener('pointercancel', () => {
+    dragAnchor = null;
+    overlay.style.cursor = 'grab';
+  });
+}
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const n = typeof value === 'string' ? Number.parseInt(value, 10) : (typeof value === 'number' ? value : Number.NaN);
@@ -216,9 +276,27 @@ function cachePlasticMaterial() {
 const HOME_ORIENTATION = new THREE.Quaternion().setFromEuler(new THREE.Euler(15 * Math.PI / 180, -5 * Math.PI / 180, 0));
 var cubeQuaternion: THREE.Quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(15 * Math.PI / 180, -20 * Math.PI / 180, 0));
 
-const DR_LOCK_ORIENTATION = new THREE.Quaternion().setFromEuler(
+const DR_LOCK_BASE = new THREE.Quaternion().setFromEuler(
   new THREE.Euler(15 * Math.PI / 180, -20 * Math.PI / 180, 0)
 );
+// z2 rotation quaternion — post-multiplied onto the gyro target when D=White is on.
+// Post-multiply (cubeQ * QZ2) correctly compensates the z2 model's starting orientation
+// without reversing left/right or up/down gyro axes.
+const QZ2 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
+
+// Persistent user orientation adjustment, modified by arcball drag.
+const ORIENT_ADJUST_KEY = 'orientAdjust';
+let orientAdjust: THREE.Quaternion = (() => {
+  try {
+    const s = localStorage.getItem(ORIENT_ADJUST_KEY);
+    if (s) {
+      const { x, y, z, w } = JSON.parse(s);
+      if ([x, y, z, w].every((v: unknown) => typeof v === 'number' && isFinite(v as number)))
+        return new THREE.Quaternion(x, y, z, w).normalize();
+    }
+  } catch { /**/ }
+  return new THREE.Quaternion(); // identity
+})();
 
 async function amimateCubeOrientation() {
   try {
@@ -238,9 +316,12 @@ async function amimateCubeOrientation() {
     }
 
     if (gyroscopeEnabled) {
-      twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
+      const gyroTarget = dWhiteReferenceEnabled
+        ? cubeQuaternion.clone().multiply(QZ2)
+        : cubeQuaternion;
+      twistyScene?.quaternion.slerp(gyroTarget, 0.25);
     } else {
-      twistyScene?.quaternion.slerp(DR_LOCK_ORIENTATION, 0.25);
+      twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
     }
 
     twistyVantage.render();
@@ -249,6 +330,7 @@ async function amimateCubeOrientation() {
     twistyScene = null;
     twistyVantage = null;
   }
+
   requestAnimationFrame(amimateCubeOrientation);
 }
 requestAnimationFrame(amimateCubeOrientation);
@@ -286,7 +368,7 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     if (!basis) {
       basis = quat.clone().conjugate();
     }
-    cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION));
+    cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
     if (netPeer.connected) {
       const now = Date.now();
       if (now - lastGyroNetTime >= 33) {
@@ -812,7 +894,9 @@ function drawAlgInCube() {
     scrambleToAlg = [];
   }
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = Alg.fromString(userAlg.join(' ')).invert().toString();
+  const invAlgStr = Alg.fromString(userAlg.join(' ')).invert().toString();
+  applyZ2SetupAlg();
+  twistyPlayer.alg = invAlgStr;
 }
 
 var showMistakesTimeout: NodeJS.Timeout;
@@ -1091,6 +1175,28 @@ function remapMoveForPlayer(move: string): string {
   return mapped === face ? move : mapped + move.slice(1);
 }
 
+// Conjugate a move by z2: maps physical sensor moves to logical white-up-frame moves
+// when the cube is held yellow-up (z2 rotation from standard orientation).
+// U<->D, R<->L, u<->d, r<->l, M<->M', E<->E', x<->x', y<->y'; F,B,S,z unchanged.
+const Z2_MOVE_MAP: Record<string, string> = {
+  'U': 'D',   "U'": "D'", 'U2': 'D2',
+  'D': 'U',   "D'": "U'", 'D2': 'U2',
+  'R': 'L',   "R'": "L'", 'R2': 'L2',
+  'L': 'R',   "L'": "R'", 'L2': 'R2',
+  'u': 'd',   "u'": "d'", 'u2': 'd2',
+  'd': 'u',   "d'": "u'", 'd2': 'u2',
+  'r': 'l',   "r'": "l'", 'r2': 'l2',
+  'l': 'r',   "l'": "r'", 'l2': 'r2',
+  'M': "M'",  "M'": 'M',  'M2': 'M2',
+  'E': "E'",  "E'": 'E',  'E2': 'E2',
+  'x': "x'",  "x'": 'x',  'x2': 'x2',
+  'y': "y'",  "y'": 'y',  'y2': 'y2',
+};
+
+function remapMoveZ2(move: string): string {
+  return Z2_MOVE_MAP[move] ?? move;
+}
+
 async function handleMoveEvent(event: SmartCubeEvent) {
   if (event.type !== "MOVE") return;
 
@@ -1104,7 +1210,7 @@ async function handleMoveEvent(event: SmartCubeEvent) {
         const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
         const sliceMove = getSliceForPair(bufferedMove, moveStr);
         if (sliceMove) {
-          twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
+          twistyTracker.experimentalAddMove(dWhiteReferenceEnabled ? remapMoveZ2(bufferedMove) : bufferedMove, { cancel: false });
           return processMoveEvent(event, sliceMove, bufferedEvent);
         } else {
           await processMoveEvent(bufferedEvent);
@@ -1137,15 +1243,16 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
-    const logicalMove = event.move;
-
+    const sensorMove = event.move;
+    const logicalMove = dWhiteReferenceEnabled ? remapMoveZ2(sensorMove) : sensorMove;
     if (visualMove) {
-      updateSliceOrientation(visualMove);
-      enqueueVisualMove(visualMove);
+      const logicalVisualMove = dWhiteReferenceEnabled ? remapMoveZ2(visualMove) : visualMove;
+      updateSliceOrientation(logicalVisualMove);
+      enqueueVisualMove(logicalVisualMove);
     } else {
       enqueueVisualMove(remapMoveForPlayer(logicalMove));
     }
-    twistyTracker.experimentalAddMove(event.move, { cancel: false });
+    twistyTracker.experimentalAddMove(logicalMove, { cancel: false });
     appliedPhysicalMoves.push(logicalMove);
     if (netPeer.connected) netPeer.send({ type: 'move', move: logicalMove });
 
@@ -1363,16 +1470,16 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     }
     if (!found) {
       if (slicePairedFirst?.type === "MOVE") {
-        badAlg.push(slicePairedFirst.move);
+        badAlg.push(dWhiteReferenceEnabled ? remapMoveZ2(slicePairedFirst.move) : slicePairedFirst.move);
       }
-      badAlg.push(event.move);
+      badAlg.push(logicalMove);
       //console.log("Pushing 1 incorrect move. badAlg: " + badAlg)
 
-      if (currentMoveIndex === 0 && badAlg.length === 1 && lastMoves[lastMoves.length - 1].move === getInverseMove(userAlg[currentMoveIndex].replace(/[()]/g, ""))) {
+      if (currentMoveIndex === 0 && badAlg.length === 1 && logicalMove === getInverseMove(userAlg[currentMoveIndex].replace(/[()]/g, ""))) {
         currentMoveIndex--;
         badAlg.pop();
         //console.log("Cancelling first correct move");
-      }  else if (lastMoves[lastMoves.length - 1].move === getInverseMove(badAlg[badAlg.length -2])) {
+      }  else if (logicalMove === getInverseMove(badAlg[badAlg.length -2])) {
         badAlg.pop();
         badAlg.pop();
         //console.log("Popping last incorrect move. badAlg=" + badAlg);
@@ -1453,6 +1560,7 @@ function handleFaceletsEvent(event: SmartCubeEvent) {
       twistyTracker.alg = '';
     }
     applyWhiteOnBottomState({ persist: false });
+    applyDWhiteReferenceState({ persist: false });
     cubeStateInitialized = true;
     console.log("Initial cube state is applied successfully", event.facelets);
   }
@@ -2109,9 +2217,10 @@ $('#scramble-to').on('click', () => {
       $('#alg-scramble').show();
       $('#alg-scramble-hint').hide();
       $('#alg-scramble-text').text(scramble);
-      // draw real cube state (mirror tracker; applyWhiteOnBottomState applies z2 + alg together)
+      // draw real cube state (mirror tracker; apply z2 setup alg + sync together)
       if (conn && !trackerReset) {
         applyWhiteOnBottomState({ persist: false });
+        applyDWhiteReferenceState({ persist: false });
       }
     } else {
       scrambleMode = false;
@@ -2253,6 +2362,16 @@ smartcubeShowAllBleToggle.addEventListener('change', () => {
   );
 });
 
+// These variables must be declared before $(function(){}) to avoid TDZ.
+// jQuery fires the DOM-ready callback synchronously when DOM is already ready (deferred module scripts).
+let whiteOnBottomEnabled: boolean = false;
+const whiteOnBottomToggle = document.getElementById('white-on-bottom-toggle') as HTMLInputElement;
+const whiteOnBottomHint = document.getElementById('white-on-bottom-hint') as HTMLElement | null;
+let dWhiteReferenceEnabled: boolean = false;
+const dWhiteReferenceToggle = document.getElementById('d-white-reference-toggle') as HTMLInputElement;
+const dWhiteReferenceQuickToggle = document.getElementById('quick-d-white-reference') as HTMLInputElement;
+const dWhiteReferenceHint = document.getElementById('d-white-reference-hint') as HTMLElement | null;
+
 $(function() {
   renameOldKeys();
   loadConfiguration();
@@ -2297,18 +2416,26 @@ function loadConfiguration() {
   }
 
   const whiteOnBottom = localStorage.getItem('whiteOnBottom');
-  if (whiteOnBottom) {
-    whiteOnBottomEnabled = whiteOnBottom === 'true';
-  } else {
-    whiteOnBottomEnabled = false;
-  }
-  // Enforce dependency: white-on-bottom requires full stickering.
-  if (!fullStickeringEnabled && whiteOnBottomEnabled) {
-    whiteOnBottomEnabled = false;
+  whiteOnBottomEnabled = whiteOnBottom === 'true' && fullStickeringEnabled;
+  if (!fullStickeringEnabled && whiteOnBottom === 'true') {
     localStorage.setItem('whiteOnBottom', 'false');
   }
+
+  const savedDWhiteRef = localStorage.getItem('dWhiteReference');
+  dWhiteReferenceEnabled = savedDWhiteRef === 'true' && fullStickeringEnabled;
+  if (!fullStickeringEnabled && savedDWhiteRef === 'true') {
+    localStorage.setItem('dWhiteReference', 'false');
+  }
+  // Enforce mutual exclusion on load.
+  if (whiteOnBottomEnabled && dWhiteReferenceEnabled) {
+    dWhiteReferenceEnabled = false;
+    localStorage.setItem('dWhiteReference', 'false');
+  }
+
   applyWhiteOnBottomState({ persist: false });
+  applyDWhiteReferenceState({ persist: false });
   updateWhiteOnBottomAvailability();
+  updateDWhiteReferenceAvailability();
 
   const backview = localStorage.getItem('backview');
   if (backview) {
@@ -2434,15 +2561,17 @@ fullStickeringToggle.addEventListener('change', () => {
     twistyPlayerRemote.experimentalStickering = twistyPlayer.experimentalStickering;
   }
   if (!fullStickeringEnabled) {
-    // Enforce dependency: if full stickering is disabled, white-on-bottom must be off.
+    // Enforce dependency: if full stickering is disabled, white-on-bottom and D=White must be off.
     setWhiteOnBottomEnabled(false, { persist: true });
+    setDWhiteRefEnabled(false, { persist: true });
   }
   updateWhiteOnBottomAvailability();
+  updateDWhiteReferenceAvailability();
 });
 
-let whiteOnBottomEnabled: boolean = false;
-const whiteOnBottomToggle = document.getElementById('white-on-bottom-toggle') as HTMLInputElement;
-const whiteOnBottomHint = document.getElementById('white-on-bottom-hint') as HTMLElement | null;
+function applyZ2SetupAlg() {
+  twistyPlayer.experimentalSetupAlg = (whiteOnBottomEnabled || dWhiteReferenceEnabled) ? 'z2' : '';
+}
 
 function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   const persist = options?.persist ?? false;
@@ -2450,7 +2579,7 @@ function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   if (persist) {
     localStorage.setItem('whiteOnBottom', whiteOnBottomEnabled.toString());
   }
-  twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
+  applyZ2SetupAlg();
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
       twistyPlayer.alg = alg.toString();
@@ -2468,6 +2597,11 @@ function updateWhiteOnBottomAvailability() {
 
 function setWhiteOnBottomEnabled(enabled: boolean, options?: { persist?: boolean }) {
   whiteOnBottomEnabled = enabled;
+  // Mutual exclusion: turning on white-on-bottom disables D=White Reference.
+  if (enabled && dWhiteReferenceEnabled) {
+    dWhiteReferenceEnabled = false;
+    applyDWhiteReferenceState({ persist: true });
+  }
   applyWhiteOnBottomState({ persist: options?.persist ?? false });
 }
 
@@ -2480,6 +2614,50 @@ whiteOnBottomToggle.addEventListener('change', () => {
   }
   setWhiteOnBottomEnabled(whiteOnBottomToggle.checked, { persist: true });
   updateWhiteOnBottomAvailability();
+});
+
+// D=White Reference: full yellow-up reference frame (visual z2 + move remapping).
+// (variable declarations are hoisted above $(function(){}) — see above)
+
+function applyDWhiteReferenceState(options?: { persist?: boolean }) {
+  if (dWhiteReferenceToggle) dWhiteReferenceToggle.checked = dWhiteReferenceEnabled;
+  if (dWhiteReferenceQuickToggle) dWhiteReferenceQuickToggle.checked = dWhiteReferenceEnabled;
+  if (options?.persist) localStorage.setItem('dWhiteReference', dWhiteReferenceEnabled.toString());
+  setDWhiteReferenceEnabled(dWhiteReferenceEnabled);
+  applyZ2SetupAlg();
+  if (conn) {
+    void twistyTracker.experimentalGet.alg().then((alg) => {
+      twistyPlayer.alg = alg.toString();
+    }).catch((err) => console.warn('twisty alg sync failed', err));
+  }
+}
+
+function updateDWhiteReferenceAvailability() {
+  const available = fullStickeringEnabled;
+  if (dWhiteReferenceToggle) dWhiteReferenceToggle.disabled = !available;
+  if (dWhiteReferenceHint) {
+    dWhiteReferenceHint.classList.toggle('hidden', available);
+  }
+}
+
+function setDWhiteRefEnabled(enabled: boolean, options?: { persist?: boolean }) {
+  dWhiteReferenceEnabled = enabled;
+  // Mutual exclusion: turning on D=White disables white-on-bottom.
+  if (enabled && whiteOnBottomEnabled) {
+    whiteOnBottomEnabled = false;
+    applyWhiteOnBottomState({ persist: true });
+  }
+  applyDWhiteReferenceState({ persist: options?.persist ?? false });
+}
+
+dWhiteReferenceToggle?.addEventListener('change', () => {
+  const enabled = dWhiteReferenceToggle.checked;
+  if (enabled && !fullStickeringEnabled) {
+    fullStickeringToggle.checked = true;
+    fullStickeringToggle.dispatchEvent(new Event('change'));
+  }
+  setDWhiteRefEnabled(dWhiteReferenceToggle.checked, { persist: true });
+  updateDWhiteReferenceAvailability();
 });
 
 var flashingIndicatorEnabled: boolean = true;
@@ -2567,7 +2745,7 @@ function initQuickBar() {
   setupQuickToggleSync('quick-control-panel',       'control-panel-toggle');
   setupQuickToggleSync('quick-hint-facelets',       'hintFacelets-toggle');
   setupQuickToggleSync('quick-full-stickering',     'full-stickering-toggle');
-  setupQuickToggleSync('quick-white-on-bottom',     'white-on-bottom-toggle');
+  setupQuickToggleSync('quick-d-white-reference',   'd-white-reference-toggle');
   setupQuickToggleSync('quick-flashing-indicator',  'flashing-indicator-toggle');
   setupQuickToggleSync('quick-show-alg-name',       'show-alg-name-toggle');
   setupQuickToggleSync('quick-always-scramble-to',  'always-scramble-to-toggle');
