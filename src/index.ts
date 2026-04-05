@@ -110,7 +110,7 @@ if (cubeCellEl) {
     const rect = overlay.getBoundingClientRect();
     const radius = Math.min(rect.width, rect.height) / 2;
     const nx = (e.clientX - rect.left - rect.width / 2) / radius;
-    const ny = -((e.clientY - rect.top - rect.height / 2) / radius); // Y-up
+    const ny = -((e.clientY - rect.top - rect.height / 2) / radius);
     return arcballProject(nx, ny);
   }
 
@@ -400,7 +400,16 @@ function drawAlgInCube() {
     $('#alg-display').text(userAlg.join(' '));
     scrambleToAlg = [];
   }
-  twistyPlayer.alg = Alg.fromString(userAlg.join(' ')).invert().toString();
+  const invAlgStr = Alg.fromString(userAlg.join(' ')).invert().toString();
+  if (dWhiteReferenceEnabled) {
+    // Sensor-frame case display: no z2 setup; remap invAlg to sensor notation so the
+    // white-up model (oriented yellow-up by the gyro) shows the correct case.
+    twistyPlayer.experimentalSetupAlg = '';
+    twistyPlayer.alg = invAlgStr.split(/\s+/).filter(m => m).map(m => remapMoveZ2(m)).join(' ');
+  } else {
+    applyZ2SetupAlg();
+    twistyPlayer.alg = invAlgStr;
+  }
 }
 
 var showMistakesTimeout: NodeJS.Timeout;
@@ -748,13 +757,13 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
 
-    const logicalMove = dWhiteReferenceEnabled ? remapMoveZ2(event.move) : event.move;
+    const sensorMove = event.move;
+    const logicalMove = dWhiteReferenceEnabled ? remapMoveZ2(sensorMove) : sensorMove;
     if (visualMove) {
-      const logicalVisualMove = dWhiteReferenceEnabled ? remapMoveZ2(visualMove) : visualMove;
-      updateSliceOrientation(logicalVisualMove);
-      twistyPlayer.experimentalAddMove(logicalVisualMove, { cancel: false });
+      updateSliceOrientation(visualMove);
+      twistyPlayer.experimentalAddMove(visualMove, { cancel: false });
     } else {
-      twistyPlayer.experimentalAddMove(remapMoveForPlayer(logicalMove), { cancel: false });
+      twistyPlayer.experimentalAddMove(remapMoveForPlayer(sensorMove), { cancel: false });
     }
     twistyTracker.experimentalAddMove(logicalMove, { cancel: false });
 
@@ -1981,7 +1990,7 @@ fullStickeringToggle.addEventListener('change', () => {
 });
 
 function applyZ2SetupAlg() {
-  twistyPlayer.experimentalSetupAlg = (whiteOnBottomEnabled || dWhiteReferenceEnabled) ? 'z2' : '';
+  twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
 }
 
 function applyWhiteOnBottomState(options?: { persist?: boolean }) {
@@ -2038,7 +2047,13 @@ function applyDWhiteReferenceState(options?: { persist?: boolean }) {
   applyZ2SetupAlg();
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
-      twistyPlayer.alg = alg.toString();
+      if (dWhiteReferenceEnabled) {
+        // Tracker alg is yellow-up; convert to sensor (white-up) notation for the player.
+        const sensorAlg = alg.toString().split(/\s+/).filter(m => m).map(m => remapMoveZ2(m)).join(' ');
+        twistyPlayer.alg = sensorAlg;
+      } else {
+        twistyPlayer.alg = alg.toString();
+      }
     }).catch((err) => console.warn('twisty alg sync failed', err));
   }
 }
