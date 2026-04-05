@@ -8,6 +8,12 @@ export var fullStickeringEnabled: boolean = false;
 export function setFullStickeringEnabled(value: boolean) {
   fullStickeringEnabled = value;
 }
+
+export var yellowUpEnabled: boolean = false;
+
+export function setYellowUpEnabled(value: boolean) {
+  yellowUpEnabled = value;
+}
 import { makeTimeFromTimestamp } from 'smartcube-web-bluetooth';
 import { Chart, registerables } from 'chart.js';
 
@@ -431,7 +437,7 @@ export function loadAlgorithms(category: string) {
               <div id="best-time-${algId}" class="col-span-1 font-mono text-gray-900 dark:text-white text-xs">Best: ${bestTimeString(bestTime)}</div>
               <div id="ao5-time-${algId}" class="col-span-1 font-mono text-gray-900 dark:text-white text-xs">Ao5: ${averageTimeString(averageOfFiveTimeNumber(algId))}</div>
               <div id="alg-case-${algId}" class="flex items-center justify-center scale-50 -mx-20 -mt-10 -mb-10 relative z-10">
-                <twisty-player puzzle="3x3x3" visualization="${visualization}" experimental-stickering="${matchedStickering}" alg="${alg.algorithm}" experimental-setup-anchor="end" control-panel="none" hint-facelets="none" experimental-drag-input="none" background="none"></twisty-player>
+                <twisty-player puzzle="3x3x3" visualization="${visualization}" experimental-stickering="${matchedStickering}" alg="${alg.algorithm}" experimental-setup-anchor="end" control-panel="none" hint-facelets="none" experimental-drag-input="none" background="none"${yellowUpEnabled ? ' experimental-setup-alg="z2"' : ''}></twisty-player>
               </div>
               <div class="grid grid-cols-2 mt-1 relative z-10">
                   <input type="checkbox" id="case-toggle-${algId}" class="sr-only" data-algorithm="${alg.algorithm}" data-name="${alg.name}" data-best="${bestTime}" />

@@ -26,7 +26,7 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
-import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled } from './functions';
+import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled, setYellowUpEnabled } from './functions';
 
 const SOLVED_STATE = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
 
@@ -605,6 +605,28 @@ function remapMoveForPlayer(move: string): string {
   return mapped === face ? move : mapped + move.slice(1);
 }
 
+// Conjugate a move by z2: maps physical sensor moves to logical white-up-frame moves
+// when the cube is held yellow-up (z2 rotation from standard orientation).
+// U<->D, R<->L, u<->d, r<->l, M<->M', E<->E', x<->x', y<->y'; F,B,S,z unchanged.
+const Z2_MOVE_MAP: Record<string, string> = {
+  'U': 'D',   "U'": "D'", 'U2': 'D2',
+  'D': 'U',   "D'": "U'", 'D2': 'U2',
+  'R': 'L',   "R'": "L'", 'R2': 'L2',
+  'L': 'R',   "L'": "R'", 'L2': 'R2',
+  'u': 'd',   "u'": "d'", 'u2': 'd2',
+  'd': 'u',   "d'": "u'", 'd2': 'u2',
+  'r': 'l',   "r'": "l'", 'r2': 'l2',
+  'l': 'r',   "l'": "r'", 'l2': 'r2',
+  'M': "M'",  "M'": 'M',  'M2': 'M2',
+  'E': "E'",  "E'": 'E',  'E2': 'E2',
+  'x': "x'",  "x'": 'x',  'x2': 'x2',
+  'y': "y'",  "y'": 'y',  'y2': 'y2',
+};
+
+function remapMoveZ2(move: string): string {
+  return Z2_MOVE_MAP[move] ?? move;
+}
+
 async function handleMoveEvent(event: SmartCubeEvent) {
   if (event.type !== "MOVE") return;
 
@@ -618,7 +640,7 @@ async function handleMoveEvent(event: SmartCubeEvent) {
         const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
         const sliceMove = getSliceForPair(bufferedMove, moveStr);
         if (sliceMove) {
-          twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
+          twistyTracker.experimentalAddMove(whiteOnBottomEnabled ? remapMoveZ2(bufferedMove) : bufferedMove, { cancel: false });
           return processMoveEvent(event, sliceMove, bufferedEvent);
         } else {
           await processMoveEvent(bufferedEvent);
@@ -652,13 +674,15 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
 
+    const logicalMove = whiteOnBottomEnabled ? remapMoveZ2(event.move) : event.move;
     if (visualMove) {
-      updateSliceOrientation(visualMove);
-      twistyPlayer.experimentalAddMove(visualMove, { cancel: false });
+      const logicalVisualMove = whiteOnBottomEnabled ? remapMoveZ2(visualMove) : visualMove;
+      updateSliceOrientation(logicalVisualMove);
+      twistyPlayer.experimentalAddMove(logicalVisualMove, { cancel: false });
     } else {
-      twistyPlayer.experimentalAddMove(remapMoveForPlayer(event.move), { cancel: false });
+      twistyPlayer.experimentalAddMove(remapMoveForPlayer(logicalMove), { cancel: false });
     }
-    twistyTracker.experimentalAddMove(event.move, { cancel: false });
+    twistyTracker.experimentalAddMove(logicalMove, { cancel: false });
 
     if (scrambleMode) {
 
@@ -671,16 +695,16 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
       const isDoubleTurn = firstCurrentScrambleMove.charAt(1) === '2';
 
       if (scrambleMoves.length >= currentScrambleMoves.length && scrambleMoves.length > 2) {
-        if (event.move === firstCurrentScrambleMove || (event.move.charAt(0) === firstCurrentScrambleMove.charAt(0) && isDoubleTurn)) {
+        if (logicalMove === firstCurrentScrambleMove || (logicalMove.charAt(0) === firstCurrentScrambleMove.charAt(0) && isDoubleTurn)) {
           // Remove the first move from the scramble if not a double turn
           scramble = currentScrambleMoves.slice(1).join(' ');
           if (isDoubleTurn) {
-            scramble = event.move + " " + scramble;
+            scramble = logicalMove + " " + scramble;
           }
         }
       }
       // fix for opposite moves in different order, eg: U' D2 F2 -> D2 U' F2
-      if (scrambleMoves.length === currentScrambleMoves.length - 1 && scrambleMoves.length > 2 && event.move === firstCurrentScrambleMove) {
+      if (scrambleMoves.length === currentScrambleMoves.length - 1 && scrambleMoves.length > 2 && logicalMove === firstCurrentScrambleMove) {
           scramble = currentScrambleMoves.slice(1).join(' ');
       }
 
@@ -1870,6 +1894,7 @@ function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   if (persist) {
     localStorage.setItem('whiteOnBottom', whiteOnBottomEnabled.toString());
   }
+  setYellowUpEnabled(whiteOnBottomEnabled);
   twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
