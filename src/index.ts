@@ -210,6 +210,10 @@ var cubeQuaternion: THREE.Quaternion = new THREE.Quaternion().setFromEuler(new T
 const DR_LOCK_BASE = new THREE.Quaternion().setFromEuler(
   new THREE.Euler(15 * Math.PI / 180, -20 * Math.PI / 180, 0)
 );
+// z2 rotation quaternion — post-multiplied onto the gyro target when D=White is on.
+// Post-multiply (cubeQ * QZ2) correctly compensates the z2 model's starting orientation
+// without reversing left/right or up/down gyro axes.
+const QZ2 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI);
 
 // Persistent user orientation adjustment, modified by arcball drag.
 const ORIENT_ADJUST_KEY = 'orientAdjust';
@@ -242,7 +246,10 @@ async function amimateCubeOrientation() {
   }
 
   if (gyroscopeEnabled) {
-    twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
+    const gyroTarget = dWhiteReferenceEnabled
+      ? cubeQuaternion.clone().multiply(QZ2)
+      : cubeQuaternion;
+    twistyScene?.quaternion.slerp(gyroTarget, 0.25);
   } else {
     twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
   }
@@ -401,15 +408,8 @@ function drawAlgInCube() {
     scrambleToAlg = [];
   }
   const invAlgStr = Alg.fromString(userAlg.join(' ')).invert().toString();
-  if (dWhiteReferenceEnabled) {
-    // Sensor-frame case display: no z2 setup; remap invAlg to sensor notation so the
-    // white-up model (oriented yellow-up by the gyro) shows the correct case.
-    twistyPlayer.experimentalSetupAlg = '';
-    twistyPlayer.alg = invAlgStr.split(/\s+/).filter(m => m).map(m => remapMoveZ2(m)).join(' ');
-  } else {
-    applyZ2SetupAlg();
-    twistyPlayer.alg = invAlgStr;
-  }
+  applyZ2SetupAlg();
+  twistyPlayer.alg = invAlgStr;
 }
 
 var showMistakesTimeout: NodeJS.Timeout;
@@ -760,10 +760,11 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     const sensorMove = event.move;
     const logicalMove = dWhiteReferenceEnabled ? remapMoveZ2(sensorMove) : sensorMove;
     if (visualMove) {
-      updateSliceOrientation(visualMove);
-      twistyPlayer.experimentalAddMove(visualMove, { cancel: false });
+      const logicalVisualMove = dWhiteReferenceEnabled ? remapMoveZ2(visualMove) : visualMove;
+      updateSliceOrientation(logicalVisualMove);
+      twistyPlayer.experimentalAddMove(logicalVisualMove, { cancel: false });
     } else {
-      twistyPlayer.experimentalAddMove(remapMoveForPlayer(sensorMove), { cancel: false });
+      twistyPlayer.experimentalAddMove(remapMoveForPlayer(logicalMove), { cancel: false });
     }
     twistyTracker.experimentalAddMove(logicalMove, { cancel: false });
 
@@ -1990,7 +1991,7 @@ fullStickeringToggle.addEventListener('change', () => {
 });
 
 function applyZ2SetupAlg() {
-  twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
+  twistyPlayer.experimentalSetupAlg = (whiteOnBottomEnabled || dWhiteReferenceEnabled) ? 'z2' : '';
 }
 
 function applyWhiteOnBottomState(options?: { persist?: boolean }) {
@@ -2047,13 +2048,7 @@ function applyDWhiteReferenceState(options?: { persist?: boolean }) {
   applyZ2SetupAlg();
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
-      if (dWhiteReferenceEnabled) {
-        // Tracker alg is yellow-up; convert to sensor (white-up) notation for the player.
-        const sensorAlg = alg.toString().split(/\s+/).filter(m => m).map(m => remapMoveZ2(m)).join(' ');
-        twistyPlayer.alg = sensorAlg;
-      } else {
-        twistyPlayer.alg = alg.toString();
-      }
+      twistyPlayer.alg = alg.toString();
     }).catch((err) => console.warn('twisty alg sync failed', err));
   }
 }
