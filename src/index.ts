@@ -924,16 +924,16 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     }
     if (!found) {
       if (slicePairedFirst?.type === "MOVE") {
-        badAlg.push(slicePairedFirst.move);
+        badAlg.push(dWhiteReferenceEnabled ? remapMoveZ2(slicePairedFirst.move) : slicePairedFirst.move);
       }
-      badAlg.push(event.move);
+      badAlg.push(logicalMove);
       //console.log("Pushing 1 incorrect move. badAlg: " + badAlg)
 
-      if (currentMoveIndex === 0 && badAlg.length === 1 && lastMoves[lastMoves.length - 1].move === getInverseMove(userAlg[currentMoveIndex].replace(/[()]/g, ""))) {
+      if (currentMoveIndex === 0 && badAlg.length === 1 && logicalMove === getInverseMove(userAlg[currentMoveIndex].replace(/[()]/g, ""))) {
         currentMoveIndex--;
         badAlg.pop();
         //console.log("Cancelling first correct move");
-      }  else if (lastMoves[lastMoves.length - 1].move === getInverseMove(badAlg[badAlg.length -2])) {
+      }  else if (logicalMove === getInverseMove(badAlg[badAlg.length -2])) {
         badAlg.pop();
         badAlg.pop();
         //console.log("Popping last incorrect move. badAlg=" + badAlg);
