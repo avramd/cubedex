@@ -2289,39 +2289,49 @@ $('#select-learning-toggle').on('change', function() {
 });
 
 // Add event listener for the random order toggle
-let randomAlgorithms: boolean = false;
+let randomAlgorithms: boolean = localStorage.getItem('randomAlgorithms') === 'true';
 const randomOrderToggle = document.getElementById('random-order-toggle') as HTMLInputElement;
+randomOrderToggle.checked = randomAlgorithms;
 randomOrderToggle.addEventListener('change', () => {
   randomAlgorithms = randomOrderToggle.checked;
+  localStorage.setItem('randomAlgorithms', String(randomAlgorithms));
   if (prioritizeSlowAlgs) {
     prioritizeSlowToggle.checked = false
     prioritizeSlowAlgs = false
+    localStorage.setItem('prioritizeSlowAlgs', 'false');
   }
 });
 
 // Add event listener for the random AUF toggle
-let randomizeAUF: boolean = false;
+let randomizeAUF: boolean = localStorage.getItem('randomizeAUF') === 'true';
 const randomAUFToggle = document.getElementById('random-auf-toggle') as HTMLInputElement;
+randomAUFToggle.checked = randomizeAUF;
 randomAUFToggle.addEventListener('change', () => {
   randomizeAUF = randomAUFToggle.checked;
+  localStorage.setItem('randomizeAUF', String(randomizeAUF));
 });
 
 // Add event listener for the prioritize slow toggle
-let prioritizeSlowAlgs: boolean = false;
+let prioritizeSlowAlgs: boolean = localStorage.getItem('prioritizeSlowAlgs') === 'true';
 const prioritizeSlowToggle = document.getElementById('prioritize-slow-toggle') as HTMLInputElement;
+prioritizeSlowToggle.checked = prioritizeSlowAlgs;
 prioritizeSlowToggle.addEventListener('change', () => {
   prioritizeSlowAlgs = prioritizeSlowToggle.checked;
+  localStorage.setItem('prioritizeSlowAlgs', String(prioritizeSlowAlgs));
   if (randomAlgorithms) {
     randomOrderToggle.checked = false
     randomAlgorithms = false
+    localStorage.setItem('randomAlgorithms', 'false');
   }
 });
 
 // Add event listener for the prioritize failed toggle
-let prioritizeFailedAlgs: boolean = false;
+let prioritizeFailedAlgs: boolean = localStorage.getItem('prioritizeFailedAlgs') === 'true';
 const prioritizeFailedToggle = document.getElementById('prioritize-failed-toggle') as HTMLInputElement;
+prioritizeFailedToggle.checked = prioritizeFailedAlgs;
 prioritizeFailedToggle.addEventListener('change', () => {
   prioritizeFailedAlgs = prioritizeFailedToggle.checked;
+  localStorage.setItem('prioritizeFailedAlgs', String(prioritizeFailedAlgs));
 });
 
 $('#toggle-move-mask').on('click', (event) => {
