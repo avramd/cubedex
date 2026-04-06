@@ -294,6 +294,9 @@ var algPatternStates: KPattern[] = [];
 var currentMoveIndex = 0;
 var inputMode: boolean = true;
 var scrambleMode: boolean = false;
+let scrambleOffPathMoves: string[] = [];
+let scrambleDivergenceRemaining: string = '';
+let scrambleHintTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function resetAlg() {
   currentMoveIndex = -1; // Reset the move index
@@ -771,38 +774,96 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     if (scrambleMode) {
 
       const cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
-      let scramble = getScrambleToSolution(userAlg.join(' '), cubePattern)!;
-      const currentScramble = $('#alg-scramble').text();
-      const scrambleMoves = scramble.split(' ');
-      const currentScrambleMoves = currentScramble.split(' ');
-      const firstCurrentScrambleMove = currentScrambleMoves[0];
-      const isDoubleTurn = firstCurrentScrambleMove.charAt(1) === '2';
+      const resolvedScramble = getScrambleToSolution(userAlg.join(' '), cubePattern)!;
+      const currentScramble = $('#alg-scramble-text').text().trim();
+      const resolvedMoves = resolvedScramble ? resolvedScramble.split(' ').filter(Boolean) : [];
+      const currentMoves  = currentScramble  ? currentScramble.split(' ').filter(Boolean)  : [];
+      const firstCurrent  = currentMoves[0] ?? '';
+      const isDoubleTurn  = firstCurrent.charAt(1) === '2';
+      const isMidDoubleTurn = isDoubleTurn && logicalMove.charAt(0) === firstCurrent.charAt(0);
+      const isDiverging   = resolvedMoves.length > currentMoves.length;
 
-      if (scrambleMoves.length >= currentScrambleMoves.length && scrambleMoves.length > 2) {
-        if (logicalMove === firstCurrentScrambleMove || (logicalMove.charAt(0) === firstCurrentScrambleMove.charAt(0) && isDoubleTurn)) {
+      // Undo-stack tracking
+      if (isMidDoubleTurn) {
+        // no change during first half of a ?2 move
+      } else if (isDiverging) {
+        if (scrambleOffPathMoves.length === 0) {
+          scrambleDivergenceRemaining = currentScramble;
+        }
+        scrambleOffPathMoves.push(logicalMove);
+      } else if (scrambleOffPathMoves.length > 0) {
+        const lastWrong = scrambleOffPathMoves[scrambleOffPathMoves.length - 1];
+        if (logicalMove === getInverseMove(lastWrong)) {
+          scrambleOffPathMoves.pop();
+          if (scrambleOffPathMoves.length === 0) scrambleDivergenceRemaining = '';
+        } else {
+          // took a different route; trust re-solve
+          scrambleOffPathMoves = [];
+          scrambleDivergenceRemaining = '';
+        }
+      }
+
+      // Choose display scramble: undo+continue vs re-solve (use shorter)
+      let scramble: string;
+      if (scrambleOffPathMoves.length > 0) {
+        const undoMoves = [...scrambleOffPathMoves].reverse().map(getInverseMove);
+        const divMoves  = scrambleDivergenceRemaining.split(' ').filter(Boolean);
+        const undoContinue = Alg.fromString([...undoMoves, ...divMoves].join(' '))
+          .experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 }).toString().trim();
+        const undoLen = undoContinue ? undoContinue.split(' ').filter(Boolean).length : 0;
+        if (resolvedMoves.length < undoLen) {
+          scramble = resolvedScramble;
+          scrambleOffPathMoves = [];
+          scrambleDivergenceRemaining = '';
+        } else {
+          scramble = undoContinue;
+        }
+      } else {
+        scramble = resolvedScramble;
+      }
+
+      // Existing double-turn adjustment
+      const scrambleMoves = scramble ? scramble.split(' ').filter(Boolean) : [];
+      if (scrambleMoves.length >= currentMoves.length && scrambleMoves.length > 2) {
+        if (logicalMove === firstCurrent || (logicalMove.charAt(0) === firstCurrent.charAt(0) && isDoubleTurn)) {
           // Remove the first move from the scramble if not a double turn
-          scramble = currentScrambleMoves.slice(1).join(' ');
+          scramble = currentMoves.slice(1).join(' ');
           if (isDoubleTurn) {
-            scramble = logicalMove + " " + scramble;
+            scramble = logicalMove + ' ' + scramble;
           }
         }
       }
       // fix for opposite moves in different order, eg: U' D2 F2 -> D2 U' F2
-      if (scrambleMoves.length === currentScrambleMoves.length - 1 && scrambleMoves.length > 2 && logicalMove === firstCurrentScrambleMove) {
-          scramble = currentScrambleMoves.slice(1).join(' ');
+      if (scrambleMoves.length === currentMoves.length - 1 && scrambleMoves.length > 2 && logicalMove === firstCurrent) {
+        scramble = currentMoves.slice(1).join(' ');
       }
 
-      if (scrambleMoves.length > currentScrambleMoves.length) {
-        $('#alg-help-info').removeClass('text-red-400 dark:text-red-500').addClass('text-green-400 dark:text-green-500').show();
+      // Hint with 2-second delay
+      const isOffPath = scrambleOffPathMoves.length > 0;
+      if (isOffPath && !isMidDoubleTurn) {
+        if (!scrambleHintTimeout) {
+          const color = dWhiteReferenceEnabled ? 'YELLOW' : 'WHITE';
+          $('#alg-scramble-hint-text').text(
+            `Ensure the cube is oriented with ${color} center on top and GREEN center on front.`
+          );
+          scrambleHintTimeout = setTimeout(() => {
+            scrambleHintTimeout = null;
+            if (scrambleOffPathMoves.length > 0) $('#alg-scramble-hint').show();
+          }, 2000);
+        }
       } else {
-        $('#alg-help-info').hide();
+        if (scrambleHintTimeout) { clearTimeout(scrambleHintTimeout); scrambleHintTimeout = null; }
+        $('#alg-scramble-hint').hide();
       }
 
-      $('#alg-scramble').text(scramble);
+      $('#alg-scramble-text').text(scramble);
 
-      if (scramble.length === 0) {
+      if (!scramble) {
         $('#alg-scramble').hide();
         $('#alg-help-info').hide();
+        scrambleOffPathMoves = [];
+        scrambleDivergenceRemaining = '';
+        if (scrambleHintTimeout) { clearTimeout(scrambleHintTimeout); scrambleHintTimeout = null; }
         scrambleMode = false;
 
         // this is the initial state for the new algorithm
@@ -1660,8 +1721,12 @@ $('#scramble-to').on('click', () => {
       scrambleMode = true;
       scrambleToAlg = [...userAlg];
       resetAlg();
+      scrambleOffPathMoves = [];
+      scrambleDivergenceRemaining = '';
+      if (scrambleHintTimeout) { clearTimeout(scrambleHintTimeout); scrambleHintTimeout = null; }
       $('#alg-scramble').show();
-      $('#alg-scramble').text(scramble);
+      $('#alg-scramble-hint').hide();
+      $('#alg-scramble-text').text(scramble);
       // draw real cube state (mirror tracker; apply z2 setup alg + sync together)
       applyZ2SetupAlg();
       if (conn && !trackerReset) {
@@ -1724,7 +1789,7 @@ function resetDrill() {
   $('#alg-display').html('');
   $('#alg-scramble').hide();
   $('#alg-help-info').hide();
-  $('#alg-scramble').text('');
+  $('#alg-scramble-text').text('');
   inputMode = true;
   $('#alg-input').val('');
   $('#alg-input').show();
