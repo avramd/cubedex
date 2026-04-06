@@ -366,7 +366,9 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     let { x: qx, y: qy, z: qz, w: qw } = event.quaternion;
     let quat = new THREE.Quaternion(qx, qz, -qy, qw).normalize();
     if (!basis) {
-      basis = quat.clone().conjugate();
+      basis = dWhiteReferenceEnabled
+        ? QZ2.clone().multiply(quat.clone().conjugate())
+        : quat.clone().conjugate();
     }
     cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
     if (netPeer.connected) {
