@@ -771,7 +771,7 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     if (scrambleMode) {
 
       const cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
-      let scramble = getScrambleToSolution(userAlg.join(' '), cubePattern);
+      let scramble = getScrambleToSolution(userAlg.join(' '), cubePattern)!;
       const currentScramble = $('#alg-scramble').text();
       const scrambleMoves = scramble.split(' ');
       const currentScrambleMoves = currentScramble.split(' ');
@@ -1622,20 +1622,40 @@ $('#confirm-save').on('click', () => {
   }
 });
 
-function getScrambleToSolution(alg: string, state: KPattern) {
+function getScrambleToSolution(alg: string, state: KPattern, maxDepth?: number): string | null {
   let faceCube = patternToFacelets(fixOrientation(state));
   var solvedcube = min2phase.solve(faceCube);
   let inverseAlg = Alg.fromString(expandNotation(alg).replace(/[()]/g, '')).invert();
   let finalState = Alg.fromString(solvedcube + ' ' + inverseAlg.toString()).experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 });
-  let scramble = Alg.fromString(min2phase.solve(patternToFacelets(fixOrientation(faceletsToPattern(SOLVED_STATE).applyAlg(finalState))))).invert();
+  let targetFacelets = patternToFacelets(fixOrientation(faceletsToPattern(SOLVED_STATE).applyAlg(finalState)));
+  let solveStr: string;
+  if (maxDepth !== undefined) {
+    solveStr = new (min2phase as any).Search().solution(targetFacelets, maxDepth);
+    if (solveStr.startsWith('Error')) return null;  // null = no short path (distinct from "" = already at case)
+  } else {
+    solveStr = min2phase.solve(targetFacelets);
+  }
+  let scramble = Alg.fromString(solveStr).invert();
   let result = scramble.experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 }).toString().trim();
   return result;
 }
 
 $('#scramble-to').on('click', () => {
   (async() => {
+    const algStr = userAlg.join(' ');
     let cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
-    let scramble = getScrambleToSolution(userAlg.join(' '), cubePattern);
+    const inverseAlg = Alg.fromString(expandNotation(algStr).replace(/[()]/g, '')).invert();
+    const algMoveCount = [...inverseAlg.childAlgNodes()].length;
+    let scramble = getScrambleToSolution(algStr, cubePattern, algMoveCount + 4);
+    let trackerReset = false;
+    if (scramble === null) {
+      // No short path from current state; reset tracker to solved so invAlg is the scramble
+      twistyTracker.alg = '';
+      twistyPlayer.alg = '';  // sync synchronously to avoid a late async override
+      trackerReset = true;
+      cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
+      scramble = inverseAlg.experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 }).toString().trim();
+    }
     if (scramble.length > 0) {
       scrambleMode = true;
       scrambleToAlg = [...userAlg];
@@ -1643,7 +1663,8 @@ $('#scramble-to').on('click', () => {
       $('#alg-scramble').show();
       $('#alg-scramble').text(scramble);
       // draw real cube state (mirror tracker; apply z2 setup alg + sync together)
-      if (conn) {
+      applyZ2SetupAlg();
+      if (conn && !trackerReset) {
         applyWhiteOnBottomState({ persist: false });
         applyDWhiteReferenceState({ persist: false });
       }
