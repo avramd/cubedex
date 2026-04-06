@@ -1712,6 +1712,7 @@ $('#category-select').on('change', () => {
   setCategoryStickeringDeferred(false);
   if (category) {
     loadSubsets(category);
+    restoreSubsetSelections(category);
   }
   // uncheck all checkboxes
   checkedAlgorithms = [];
@@ -1725,6 +1726,7 @@ $('#category-select').on('change', () => {
 
 // Add event listener for subset checkboxes
 $('#subset-checkboxes').on('change', 'input[type="checkbox"]', () => {
+  saveSubsetSelections();
   const selectedCategory = $('#category-select').val() as string;
   loadAlgorithms(selectedCategory);
   checkedAlgorithms = [];
@@ -2259,6 +2261,7 @@ $('#select-all-subsets-toggle').on('change', function() {
     $('#subset-checkboxes-container input[type="checkbox"]').prop('checked', false);
     loadAlgorithms('');
   }
+  saveSubsetSelections();
 });
 
 // Add event listener for the select all toggle
@@ -2271,8 +2274,31 @@ selectAllToggle.addEventListener('change', () => {
   $('#alg-cases input[type="checkbox"]').prop('checked', selectAllToggle.checked).trigger('change');
 });
 
+function saveSubsetSelections() {
+  const category = $('#category-select').val() as string;
+  if (!category) return;
+  const checked = $('#subset-checkboxes-container input[type="checkbox"]:checked')
+    .map((_, el) => $(el).val()).get();
+  const saved = JSON.parse(localStorage.getItem('savedSubsets') || '{}');
+  saved[category] = checked;
+  localStorage.setItem('savedSubsets', JSON.stringify(saved));
+}
+
+function restoreSubsetSelections(category: string) {
+  const saved = JSON.parse(localStorage.getItem('savedSubsets') || '{}');
+  const subsets: string[] = saved[category] || [];
+  if (subsets.length === 0) return;
+  $('#subset-checkboxes-container input[type="checkbox"]').each(function() {
+    if (subsets.includes($(this).val() as string)) {
+      $(this).prop('checked', true);
+    }
+  });
+  $('#subset-checkboxes').trigger('change');
+}
+
 // Add event listener for the select learning toggle
 $('#select-learning-toggle').on('change', function() {
+  localStorage.setItem('selectLearning', $(this).is(':checked') ? 'true' : 'false');
   // when select learning toggle is checked, uncheck the select all toggle
   $('#select-all-toggle').prop('checked', false);
   // when select learning toggle is checked, uncheck all the selected algorithms
@@ -2400,6 +2426,11 @@ menuButtons.forEach(item => {
 const categorySelect = $('#category-select');
 if (categorySelect.val() === null || categorySelect.val() === '') {
   loadCategories();
+  const initialCategory = categorySelect.val() as string;
+  restoreSubsetSelections(initialCategory);
+  if (localStorage.getItem('selectLearning') === 'true') {
+    $('#select-learning-toggle').prop('checked', true).trigger('change');
+  }
 }
 
 // functions to activate timer when using a dumb cube
