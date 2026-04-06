@@ -135,3 +135,6 @@ dist
 
 # package-lock.json
 package-lock.json
+
+# user's personal, unpublished algorithms
+user-algorithms/
