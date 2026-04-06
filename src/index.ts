@@ -1597,7 +1597,7 @@ $('#scramble-to').on('click', () => {
     let cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
     const inverseAlg = Alg.fromString(expandNotation(algStr).replace(/[()]/g, '')).invert();
     const algMoveCount = [...inverseAlg.childAlgNodes()].length;
-    let scramble = getScrambleToSolution(algStr, cubePattern, algMoveCount + 4);
+    let scramble = getScrambleToSolution(algStr, cubePattern, algMoveCount + 6);
     let trackerReset = false;
     if (scramble === null) {
       // No short path from current state; reset tracker to solved so invAlg is the scramble
