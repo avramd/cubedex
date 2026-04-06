@@ -253,10 +253,8 @@ $('#train-alg').on('click', () => {
     }
     $("#toggle-display").css("display", "inline-flex");
     $('#left-side-inner').show();
-    $('#alg-stats').css("display", "flex");
   } else {
     $('#alg-input').show();
-    $('#alg-stats').hide();
     $('#left-side-inner').hide();
     $('#alg-input').get(0)?.focus();
   }
@@ -1043,7 +1041,6 @@ $('#alg-display').on('click', () => {
   inputMode = true;
   $('#alg-display-container').hide();
   $('#alg-input').show();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
   $('#alg-input').get(0)?.focus();
   $('#app-top').show();
@@ -1075,7 +1072,6 @@ $('#input-alg').on('click', () => {
   $('#alg-display-container').hide();
   $('#times-display').html('');
   $('#timer').hide();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
   $('#alg-input').show();
   $('#alg-input').get(0)?.focus();
@@ -1094,7 +1090,6 @@ $('#show-help').on('click', () => {
   $('#load-container').hide();
   $('#save-container').hide();
   $('#info').hide();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
 });
 
@@ -1256,7 +1251,9 @@ function updateTimesDisplay() {
 
   if (lastTimes.length === 0) {
     timesDisplay.html('');
-    $('#alg-stats').hide();
+    $('#average-time-box').html('Average Time<br />--');
+    $('#average-tps-box').html('Average TPS<br />--');
+    $('#single-pb-box').html('Single PB<br />--');
     $('#left-side-inner').hide();
     return;
   }
@@ -1641,7 +1638,6 @@ $('#load-alg').on('click', () => {
   $('#options-container').hide();
   $('#help').hide();
   $('#info').hide();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
   $('#train-alg').trigger('click');
 });
@@ -1653,7 +1649,6 @@ $('#save-alg').on('click', () => {
   $('#times-display').html('');
   $('#timer').hide();
   $('#left-side-inner').hide();
-  $('#alg-stats').hide();
   $('#alg-scramble').hide();
   $('#alg-help-info').hide();
   $('#alg-input').show();
@@ -1681,7 +1676,6 @@ function resetDrill() {
   inputMode = true;
   $('#alg-input').val('');
   $('#alg-input').show();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
 }
 
@@ -1749,7 +1743,6 @@ $('#show-options').on('click', () => {
   $('#save-container').hide();
   $('#info').hide();
   $('#help').hide();
-  $('#alg-stats').hide();
   $('#left-side-inner').hide();
   $('#options-container').show();
 });

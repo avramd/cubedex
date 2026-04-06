@@ -716,7 +716,7 @@ export function createStatsGraph(times: number[]) {
             maintainAspectRatio: false,
             plugins: {
               legend: {
-                display: true,
+                display: false,
               },
               title: {
                 display: false,
