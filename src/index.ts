@@ -217,11 +217,37 @@ let scrambleOffPathMoves: string[] = [];
 let scrambleDivergenceRemaining: string = '';
 let scrambleHintTimeout: ReturnType<typeof setTimeout> | null = null;
 
+let currentAnimSpeed = 1.0;
+
+const visualMoveQueue: string[] = [];
+let visualMoveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function drainVisualQueue() {
+  if (visualMoveQueue.length === 0) { visualMoveTimer = null; return; }
+  twistyPlayer.experimentalAddMove(visualMoveQueue.shift()!, { cancel: false });
+  visualMoveTimer = setTimeout(drainVisualQueue, Math.round(100 / currentAnimSpeed));
+}
+
+function enqueueVisualMove(move: string) {
+  if (currentAnimSpeed <= 0.75) {
+    visualMoveQueue.push(move);
+    if (!visualMoveTimer) drainVisualQueue();
+  } else {
+    twistyPlayer.experimentalAddMove(move, { cancel: false });
+  }
+}
+
+function clearVisualQueue() {
+  visualMoveQueue.length = 0;
+  if (visualMoveTimer) { clearTimeout(visualMoveTimer); visualMoveTimer = null; }
+}
+
 function resetAlg() {
   currentMoveIndex = -1; // Reset the move index
   badAlg = [];
   sliceOrientation = { ...IDENTITY };
   hideMistakes();
+  clearVisualQueue();
 }
 
 $('#train-alg').on('click', () => {
@@ -652,12 +678,13 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
+    const logicalMove = event.move;
 
     if (visualMove) {
       updateSliceOrientation(visualMove);
-      twistyPlayer.experimentalAddMove(visualMove, { cancel: false });
+      enqueueVisualMove(visualMove);
     } else {
-      twistyPlayer.experimentalAddMove(remapMoveForPlayer(event.move), { cancel: false });
+      enqueueVisualMove(remapMoveForPlayer(logicalMove));
     }
     twistyTracker.experimentalAddMove(event.move, { cancel: false });
 
@@ -2102,6 +2129,7 @@ const quickAnimSpeedNumberEl = document.getElementById('quick-anim-speed-number'
 
 function setAnimSpeed(speed: number) {
   speed = Math.max(0.05, Math.min(1.25, speed));
+  currentAnimSpeed = speed;
   localStorage.setItem('animSpeed', String(speed));
   if (animSpeedEl) animSpeedEl.value = String(speed);
   if (animSpeedNumberEl) animSpeedNumberEl.value = speed.toFixed(2);
