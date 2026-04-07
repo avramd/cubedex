@@ -1329,8 +1329,9 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
       const isOffPath = scrambleOffPathMoves.length > 0;
       if (isOffPath && !isMidDoubleTurn) {
         if (!scrambleHintTimeout) {
+          const color = dWhiteReferenceEnabled ? 'YELLOW' : 'WHITE';
           $('#alg-scramble-hint-text').text(
-            `Ensure the cube is oriented with WHITE center on top and GREEN center on front.`
+            `Ensure the cube is oriented with ${color} center on top and GREEN center on front.`
           );
           scrambleHintTimeout = setTimeout(() => {
             scrambleHintTimeout = null;
