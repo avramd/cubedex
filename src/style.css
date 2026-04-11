@@ -1147,10 +1147,6 @@ video {
   background-color: rgb(243 244 246 / var(--tw-bg-opacity, 1));
 }
 
-.bg-gray-100\/85 {
-  background-color: rgb(243 244 246 / 0.85);
-}
-
 .bg-gray-200 {
   --tw-bg-opacity: 1;
   background-color: rgb(229 231 235 / var(--tw-bg-opacity, 1));
@@ -1645,10 +1641,6 @@ input:checked + div + .dot {
 .dark\:bg-gray-700:is(.dark *) {
   --tw-bg-opacity: 1;
   background-color: rgb(55 65 81 / var(--tw-bg-opacity, 1));
-}
-
-.dark\:bg-gray-700\/85:is(.dark *) {
-  background-color: rgb(55 65 81 / 0.85);
 }
 
 .dark\:bg-gray-800:is(.dark *) {
