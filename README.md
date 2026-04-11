@@ -39,5 +39,5 @@ BASE_PATH=/cubedex/ npm run build
 To serve the built output (the contents of `dist/`) from any static file server, ensure the server serves `index.html` for all routes (SPA fallback).
 
 ```
-rsync -av --delete dist/ example.com:/sites/example/cubedex/
+rsync -av --delete dist/ example.com:sites/example/cubedex/
 ```

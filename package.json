@@ -23,6 +23,7 @@
     "chart.js": "^4.5.1",
     "cubing": "^0.63.3",
     "jquery": "^3.7.1",
+    "peerjs": "^1.5.5",
     "rxjs": "^7.8.2",
     "smartcube-web-bluetooth": "github:poliva/smartcube-web-bluetooth"
   },
