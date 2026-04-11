@@ -1,0 +1,86 @@
+name: Build & Deploy
+
+# ── Which branches get built and published ───────────────────────────────────
+# Add or remove branch names here to control which branches are deployed.
+# • main  → deployed to the repo root  → https://avramd.github.io/cubedex/
+# • other → deployed to a sub-path     → https://avramd.github.io/cubedex/branch/<name>/
+on:
+  push:
+    branches:
+      - main
+      # Feature / experiment branches – add yours here:
+      - agd-peer-to-peer-cubing
+      - agd-ui-improvements
+      - white-d-layer-option
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    # Required so the job can push to the gh-pages branch.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── Compute BASE_PATH and deploy destination from the branch name ─────
+      # main/master  → BASE_PATH=/cubedex/           dest=.  (root of gh-pages)
+      # other branch → BASE_PATH=/cubedex/branch/X/  dest=branch/X
+      #
+      # Slashes in branch names are replaced with dashes so they form valid
+      # URL path segments (e.g. "feat/foo" → "feat-foo").
+      - name: Resolve paths
+        id: paths
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY#*/}"          # e.g. "cubedex"
+
+          # Sanitise: replace any '/' in the branch name with '-'
+          SAFE="${BRANCH//\//-}"
+
+          if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+            BASE_PATH="/${REPO}/"
+            DEST_DIR="."
+            DEPLOY_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO}/"
+          else
+            BASE_PATH="/${REPO}/branch/${SAFE}/"
+            DEST_DIR="branch/${SAFE}"
+            DEPLOY_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO}/branch/${SAFE}/"
+          fi
+
+          echo "base_path=${BASE_PATH}"   >> "$GITHUB_OUTPUT"
+          echo "dest_dir=${DEST_DIR}"     >> "$GITHUB_OUTPUT"
+          echo "deploy_url=${DEPLOY_URL}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🚀 Deploy target" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |"               >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|"            >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${BRANCH}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| BASE_PATH | \`${BASE_PATH}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| URL | ${DEPLOY_URL} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          BASE_PATH: ${{ steps.paths.outputs.base_path }}
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          destination_dir: ${{ steps.paths.outputs.dest_dir }}
+          # keep_files preserves other branches' sub-directories when any
+          # single branch is (re)deployed.
+          keep_files: true
