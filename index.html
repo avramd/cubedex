@@ -203,8 +203,15 @@
               </div>
             </div>
           </div>
-          <div id="cube" class="col-span-1 flex items-center justify-center min-w-[10em] min-h-[10em] sm:min-w-[15em] sm:min-h-[15em] text-sm sm:text-base order-3 sm:order-2"></div>
-          <div id="right-side" class="col-span-1 flex flex-col flex-grow items-center sm:items-end text-sm sm:text-base order-1 sm:order-3 h-full">
+          <div id="cube-area" class="col-span-1 flex flex-row items-center justify-center min-w-[10em] min-h-[10em] sm:min-w-[15em] sm:min-h-[15em] text-sm sm:text-base order-3 sm:order-2 gap-8">
+            <div id="cube" class="flex-1 flex items-center justify-center min-w-0 min-h-0"></div>
+            <div id="remote-cube" class="hidden flex-1 flex flex-col items-center justify-center min-w-0 min-h-0">
+              <div id="remote-cube-player" class="w-full flex items-center justify-center"></div>
+              <div id="remote-alg-name" class="text-xs font-bold text-center text-gray-700 dark:text-gray-300 mt-1 truncate max-w-full px-1"></div>
+              <button id="sync-camera-btn" class="hidden text-xs bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-2 rounded hover:bg-gray-300 dark:hover:bg-gray-500 mt-1">↩ Sync View</button>
+            </div>
+          </div>
+          <div id="right-side" class="col-span-1 flex flex-col flex-grow items-center sm:items-end text-sm sm:text-base order-1 sm:order-3 h-full relative z-10">
             <div class="flex items-center gap-2">
               <button
                 id="header-reset-gyro"
@@ -224,6 +231,34 @@
                 <div id="battery-indicator" class="hidden ml-2">
                 </div>
               </button>
+            </div>
+            <div id="net-panel" class="flex flex-col items-end gap-1 mt-2 text-sm">
+              <!-- Default: Share + Join buttons -->
+              <div id="net-main-btns" class="flex gap-1">
+                <button id="net-share-btn" class="bg-gray-200 dark:bg-gray-600 dark:text-white text-gray-800 font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">🔗 Share</button>
+                <button id="net-join-toggle-btn" class="bg-gray-200 dark:bg-gray-600 dark:text-white text-gray-800 font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">Join</button>
+              </div>
+              <!-- Share / waiting-for-partner -->
+              <div id="net-hosting-area" class="hidden flex flex-col items-end gap-0.5">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Your code:</div>
+                <div class="flex items-center gap-1">
+                  <span id="net-code" class="font-mono font-bold text-base tracking-widest text-gray-900 dark:text-white"></span>
+                  <div class="flex flex-col items-center leading-none">
+                    <button id="net-cancel-btn" class="text-gray-400 hover:text-red-500 dark:hover:text-red-400 leading-none text-xs" title="Cancel">✕</button>
+                    <button id="net-copy-btn" class="text-gray-500 hover:text-gray-800 dark:hover:text-white transition-colors duration-150" title="Copy code">📋</button>
+                  </div>
+                </div>
+                <div id="net-waiting" class="text-xs text-gray-400">Waiting for partner…</div>
+              </div>
+              <!-- Join form -->
+              <div id="net-join-area" class="hidden flex gap-1 items-center">
+                <button id="net-join-cancel-btn" class="text-gray-400 hover:text-red-500 dark:hover:text-red-400 text-xs leading-none" title="Cancel">✕</button>
+                <input id="net-join-input" type="text" placeholder="TIGER-42" maxlength="10" class="font-mono text-xs uppercase p-1 border border-gray-400 rounded dark:bg-gray-700 dark:text-white dark:border-gray-500 w-24 outline-none" />
+                <button id="net-paste-btn" class="text-gray-500 hover:text-gray-800 dark:hover:text-white text-sm transition-colors duration-150" title="Paste code">📋</button>
+                <button id="net-join-btn" class="bg-blue-500 text-white font-bold py-1 px-2 rounded text-xs hover:bg-blue-700">Go</button>
+              </div>
+              <div id="net-status" class="hidden text-xs text-gray-500 dark:text-gray-400"></div>
+              <button id="net-disconnect-btn" class="hidden text-xs text-red-500 hover:text-red-700 dark:text-red-400">Disconnect</button>
             </div>
             <div id="touch-timer" class="flex justify-center items-center h-full w-full">
               <div id="timer" class="hidden text-right font-mono p-2 border border-gray-400 rounded-lg dark:border-gray-700 dark:text-white text-sm sm:text-xl md:text-2xl lg:text-3xl mt-2 sm:ml-8"></div>
@@ -259,6 +294,12 @@
         <div id="alg-scramble" class="relative hidden mx-auto max-w-[1032px] text-green-600 p-4 bg-gray-100 border border-gray-300 rounded-lg mb-4 dark:bg-gray-700 dark:text-green-500 dark:border-green-400 text-sm sm:text-base">
           <span id="alg-scramble-text"></span>
           <div id="alg-scramble-hint" class="hidden absolute inset-0 flex items-center justify-start rounded-lg text-xs"><div class="flex flex-row gap-2 pl-2"><svg viewBox="0 0 24 24" fill="none" class="h-6 w-6 shrink-0" xmlns="http://www.w3.org/2000/svg"><defs><style>.cls-1{fill:none;stroke:currentColor;stroke-miterlimit:10;stroke-width:1.91px;}</style></defs><path class="cls-1" d="M18.68,1.48H5.32A3.82,3.82,0,0,0,1.5,5.3v9.54a3.82,3.82,0,0,0,3.82,3.82H9.14L12,21.52l2.86-2.86h3.82a3.82,3.82,0,0,0,3.82-3.82V5.3A3.82,3.82,0,0,0,18.68,1.48Z"/><line class="cls-1" x1="10.09" y1="13.89" x2="13.91" y2="13.89"/><polyline class="cls-1" points="10.09 8.16 12 8.16 12 13.89"/><line class="cls-1" x1="11.05" y1="5.3" x2="12.95" y2="5.3"/></svg><p id="alg-scramble-hint-text" class="pt-1">Ensure the cube is oriented with WHITE center on top and GREEN center on front.</p></div></div>
+        </div>
+        <div id="remote-info" class="hidden mx-auto max-w-[1032px] flex flex-row items-center gap-3 text-gray-600 dark:text-gray-300 p-2 mb-2 text-xs sm:text-sm">
+          <span class="font-bold truncate" id="remote-scramble-label">Partner:</span>
+          <span id="remote-scramble-display" class="font-mono flex-1 truncate"></span>
+          <button id="send-scramble-btn" class="hidden bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap" title="Send this case to your partner">📤 Send Case</button>
+          <button id="sync-steps-btn" class="hidden bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">Sync Steps</button>
         </div>
 
       </div>

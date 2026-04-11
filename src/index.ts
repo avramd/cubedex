@@ -28,6 +28,7 @@ import {
 import { faceletsToPattern, patternToFacelets } from './utils';
 import { initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, isFullSolveModeEnabled } from './fullSolve';
 import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled } from './functions';
+import { NetPeer, NetMessage } from './network';
 
 const SOLVED_STATE = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
 
@@ -120,6 +121,23 @@ if (cubeCellEl) {
   });
 }
 
+// Remote peer's cube (only appended to DOM when in split mode)
+var twistyPlayerRemote = new TwistyPlayer({
+  puzzle: '3x3x3',
+  visualization: 'PG3D',
+  alg: '',
+  experimentalSetupAnchor: 'start',
+  background: 'none',
+  controlPanel: 'none',
+  viewerLink: 'none',
+  hintFacelets: 'floating',
+  experimentalDragInput: 'auto',
+  cameraLatitude: 0,
+  cameraLongitude: 0,
+  tempoScale: 5,
+  experimentalStickering: 'full',
+});
+
 var conn: SmartCubeConnection | null;
 
 const SMARTCUBE_DEVICE_SELECTION_KEY = 'smartcubeDeviceSelection';
@@ -131,6 +149,7 @@ function storedSmartCubeDeviceSelection(): 'filtered' | 'any' {
 let connectAbort: AbortController | null = null;
 let connectInFlight = false;
 
+window.addEventListener('resize', () => requestAnimationFrame(applyCubeSizing));
 window.addEventListener('pagehide', () => {
   if (connectInFlight && !conn) {
     connectAbort?.abort();
@@ -146,19 +165,69 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
 }
 
 function applyCubeSizing() {
-  // Scope: only style the main twisty-player instance (not the algorithm previews).
-  const player = twistyPlayer as unknown as HTMLElement;
-  const sizePx = clampInt(cubeSizePx, 240, 600, 400);
+  const preferredSizePx = clampInt(cubeSizePx, 240, 600, 400);
+  const inSplitMode = $('#remote-cube').is(':visible');
+  const cubeAreaEl = document.getElementById('cube-area');
+  const remoteCubeEl = document.getElementById('remote-cube');
+  const remoteCubePlayerEl = document.getElementById('remote-cube-player');
 
-  player.style.width = `${sizePx}px`;
-  player.style.height = `${sizePx}px`;
-  player.style.maxWidth = 'none';
-  player.style.maxHeight = 'none';
+  let sizePx: number;
+  if (inSplitMode && containerEl && containerEl.offsetWidth > 0) {
+    const gapPx = Math.max(16, Math.round(containerEl.offsetWidth * 0.04));
+    const halfWidth = Math.floor((containerEl.offsetWidth - gapPx) / 2);
+    sizePx = Math.max(120, Math.min(preferredSizePx, halfWidth));
 
-  // Prevent clipping when the player gets large.
-  player.style.overflow = 'visible';
+    // Give #cube-area an explicit width that exactly fits both cubes + gap,
+    // then centre it within its grid column via justify-self.  This avoids the
+    // overflow/flex-centering tricks that made hit-areas unreliable.
+    const totalWidth = 2 * sizePx + gapPx;
+    if (cubeAreaEl) {
+      cubeAreaEl.style.width = `${totalWidth}px`;
+      cubeAreaEl.style.justifySelf = 'center';
+      cubeAreaEl.style.justifyContent = 'flex-start';
+      cubeAreaEl.style.gap = `${gapPx}px`;
+      cubeAreaEl.style.overflow = 'visible';
+    }
+    // flex:none = flex: 0 0 auto so explicit width is authoritative
+    if (cubeCellEl) {
+      cubeCellEl.style.flex = 'none';
+      cubeCellEl.style.width = `${sizePx}px`;
+      cubeCellEl.style.overflow = 'hidden'; // clip hint facelets at cube boundary
+    }
+    if (remoteCubeEl) {
+      remoteCubeEl.style.flex = 'none';
+      remoteCubeEl.style.width = `${sizePx}px`;
+    }
+  } else {
+    sizePx = preferredSizePx;
+    if (cubeAreaEl) {
+      cubeAreaEl.style.width = '';
+      cubeAreaEl.style.justifySelf = '';
+      cubeAreaEl.style.justifyContent = '';
+      cubeAreaEl.style.gap = '';
+    }
+    if (cubeCellEl) {
+      cubeCellEl.style.flex = '1 1 0%';
+      cubeCellEl.style.width = '';
+      cubeCellEl.style.overflow = 'visible';
+    }
+  }
+
+  const playersToSize: HTMLElement[] = [twistyPlayer as unknown as HTMLElement];
+  if (inSplitMode) playersToSize.push(twistyPlayerRemote as unknown as HTMLElement);
+  for (const player of playersToSize) {
+    player.style.width = `${sizePx}px`;
+    player.style.height = `${sizePx}px`;
+    player.style.flexShrink = '0';
+    player.style.maxWidth = 'none';
+    player.style.maxHeight = 'none';
+    player.style.overflow = 'visible';
+  }
+
+  // Ensure grid container and remote wrappers don't clip overflow.
   if (containerEl) containerEl.style.overflow = 'visible';
-  if (cubeCellEl) cubeCellEl.style.overflow = 'visible';
+  if (remoteCubeEl) remoteCubeEl.style.overflow = 'visible';
+  if (remoteCubePlayerEl) remoteCubePlayerEl.style.overflow = 'visible';
 }
 
 type SmartCubeMove = {
@@ -221,36 +290,59 @@ let orientAdjust: THREE.Quaternion = (() => {
 
 
 async function amimateCubeOrientation() {
-  if (!twistyScene || !twistyVantage || forceFix) {
-    const vantageList = await twistyPlayer.experimentalCurrentVantages();
-    twistyVantage = [...vantageList][0];
+  try {
+    if (!twistyScene || !twistyVantage || forceFix) {
+      const vantageList = await twistyPlayer.experimentalCurrentVantages();
+      twistyVantage = [...vantageList][0];
 
-    if (!twistyVantage) {
-      requestAnimationFrame(amimateCubeOrientation);
-      return;
+      if (!twistyVantage) {
+        requestAnimationFrame(amimateCubeOrientation);
+        return;
+      }
+
+      twistyScene = await twistyVantage.scene.scene();
+      cachePlasticMaterial();
+
+      if (forceFix) forceFix = false;
     }
 
-    twistyScene = await twistyVantage.scene.scene();
-    cachePlasticMaterial();
+    if (gyroscopeEnabled) {
+      twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
+    } else {
+      twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
+    }
 
-    if (forceFix) forceFix = false;
+    twistyVantage.render();
+  } catch {
+    // On any error, clear cached state so the next frame re-acquires
+    twistyScene = null;
+    twistyVantage = null;
   }
-
-  if (gyroscopeEnabled) {
-    twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
-  } else {
-    twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
-  }
-
-  twistyVantage.render();
   requestAnimationFrame(amimateCubeOrientation);
 }
 requestAnimationFrame(amimateCubeOrientation);
 
 var basis: THREE.Quaternion | null;
 
-function resetGyroBasis() {
+async function resetGyroBasis() {
   basis = null;
+  cubeQuaternion.copy(HOME_ORIENTATION);
+  let scene = twistyScene;
+  let vantage = twistyVantage;
+  if (!scene || !vantage) {
+    const vantages = await twistyPlayer.experimentalCurrentVantages();
+    vantage = [...vantages][0];
+    if (vantage) {
+      scene = await vantage.scene.scene();
+      twistyVantage = vantage;
+      twistyScene = scene;
+    }
+  }
+  if (scene) {
+    scene.quaternion.copy(HOME_ORIENTATION);
+  }
+  (vantage as any)?.scheduleRender();
+  await (vantage as any)?.render();
 }
 
 async function handleGyroEvent(event: SmartCubeEvent) {
@@ -264,6 +356,13 @@ async function handleGyroEvent(event: SmartCubeEvent) {
       basis = quat.clone().conjugate();
     }
     cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
+    if (netPeer.connected) {
+      const now = Date.now();
+      if (now - lastGyroNetTime >= 33) {
+        lastGyroNetTime = now;
+        netPeer.send({ type: 'gyro', x: cubeQuaternion.x, y: cubeQuaternion.y, z: cubeQuaternion.z, w: cubeQuaternion.w });
+      }
+    }
     $('#quaternion').val(`x: ${qx.toFixed(3)}, y: ${qy.toFixed(3)}, z: ${qz.toFixed(3)}, w: ${qw.toFixed(3)}`);
     if (event.velocity) {
       let { x: vx, y: vy, z: vz } = event.velocity;
@@ -311,6 +410,362 @@ function clearVisualQueue() {
   if (visualMoveTimer) { clearTimeout(visualMoveTimer); visualMoveTimer = null; }
 }
 
+// ── Network sharing (WebRTC / PeerJS) ─────────────────────────────────────────
+
+const netPeer = new NetPeer();
+let remoteHasCube = false;
+let remoteAlgName = '';
+let remoteScramble = '';
+let twistySceneRemote: THREE.Scene | null = null;
+const remoteGyroTarget = new THREE.Quaternion().copy(HOME_ORIENTATION);
+let lastGyroNetTime = 0;
+let remoteAnimStarted = false;
+let remoteCameraSynced = true;
+
+const remoteVisualMoveQueue: string[] = [];
+let remoteVisualMoveTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Tracks physical moves applied since the last alg reset so they can be
+// replayed on a newly-connected viewer via the 'state' message.
+let appliedPhysicalMoves: string[] = [];
+
+function drainRemoteVisualQueue() {
+  if (remoteVisualMoveQueue.length === 0) { remoteVisualMoveTimer = null; return; }
+  twistyPlayerRemote.experimentalAddMove(remoteVisualMoveQueue.shift()!, { cancel: false });
+  remoteVisualMoveTimer = setTimeout(drainRemoteVisualQueue, Math.round(100 / currentAnimSpeed));
+}
+
+function enqueueRemoteVisualMove(move: string) {
+  if (currentAnimSpeed <= 0.75) {
+    remoteVisualMoveQueue.push(move);
+    if (!remoteVisualMoveTimer) drainRemoteVisualQueue();
+  } else {
+    twistyPlayerRemote.experimentalAddMove(move, { cancel: false });
+  }
+}
+let lastRemoteCameraLat = 0;
+let lastRemoteCameraLon = 0;
+let lastCamBroadcastTime = 0;
+
+var twistyVantageRemote: any;
+let remoteVantageReady = false;
+
+async function animateRemoteCube() {
+  try {
+    if (!twistySceneRemote || !twistyVantageRemote) {
+      const vantages = await twistyPlayerRemote.experimentalCurrentVantages();
+      twistyVantageRemote = [...vantages][0];
+      if (twistyVantageRemote?.scene) twistySceneRemote = await twistyVantageRemote.scene.scene();
+      if (!remoteVantageReady && twistySceneRemote) {
+        remoteVantageReady = true;
+        // TwistyPlayer sizes its canvas via ResizeObserver. Calling applyCubeSizing
+        // here (after init) ensures the canvas is set to the correct dimensions
+        // rather than whatever size it read at connection time.
+        applyCubeSizing();
+      }
+    }
+    if (twistySceneRemote) {
+      twistySceneRemote.quaternion.slerp(remoteGyroTarget, 0.25);
+    }
+    if (twistyVantageRemote) {
+      twistyVantageRemote.render();
+    }
+  } catch {
+    twistySceneRemote = null;
+    twistyVantageRemote = null;
+  }
+  requestAnimationFrame(animateRemoteCube);
+}
+
+function updateSplitMode() {
+  const split = netPeer.connected && remoteHasCube;
+  // Show/hide remote-cube FIRST so applyCubeSizing can see the correct visibility.
+  $('#remote-cube').toggle(split);
+  $('#sync-steps-btn').toggle(split && !!conn);
+  if (split) {
+    // Size containers synchronously so TwistyPlayer initialises its canvas at the
+    // right dimensions (canvas size is fixed at initialisation time).
+    applyCubeSizing();
+    if (!$('#remote-cube-player').children().length) {
+      $('#remote-cube-player').append(twistyPlayerRemote);
+    }
+    if (!remoteAnimStarted) {
+      remoteAnimStarted = true;
+      requestAnimationFrame(animateRemoteCube);
+    }
+  }
+  // Also schedule a second pass in case the first-pass layout was slightly stale.
+  requestAnimationFrame(applyCubeSizing);
+}
+
+function updateRemoteDisplay() {
+  if (!netPeer.connected) {
+    $('#remote-info').hide();
+    $('#send-scramble-btn').hide();
+    return;
+  }
+  $('#remote-alg-name').text(remoteAlgName);
+  $('#remote-scramble-display').text(remoteScramble);
+  $('#remote-info').show();
+  $('#send-scramble-btn').toggle(userAlg.length > 0);
+}
+
+netPeer.onMessage = (msg: NetMessage) => {
+  switch (msg.type) {
+    case 'gyro':
+      remoteGyroTarget.set(msg.x, msg.y, msg.z, msg.w);
+      break;
+    case 'move':
+      enqueueRemoteVisualMove(msg.move);
+      break;
+    case 'alg':
+      remoteVisualMoveQueue.length = 0;
+      if (remoteVisualMoveTimer) { clearTimeout(remoteVisualMoveTimer); remoteVisualMoveTimer = null; }
+      twistyPlayerRemote.alg = msg.alg.join(' ');
+      remoteAlgName = msg.name;
+      updateRemoteDisplay();
+      break;
+    case 'scramble':
+      remoteScramble = msg.text;
+      updateRemoteDisplay();
+      break;
+    case 'state':
+      remoteVisualMoveQueue.length = 0;
+      if (remoteVisualMoveTimer) { clearTimeout(remoteVisualMoveTimer); remoteVisualMoveTimer = null; }
+      twistyPlayerRemote.alg = msg.alg.join(' ');
+      // Replay physical moves made after the alg was set (skip animation — jump to current state)
+      for (const m of msg.moves ?? []) {
+        twistyPlayerRemote.experimentalAddMove(m, { cancel: false });
+      }
+      remoteAlgName = msg.name;
+      remoteScramble = msg.scramble;
+      remoteHasCube = msg.hasCube;
+      updateSplitMode();
+      updateRemoteDisplay();
+      break;
+    case 'cube-connected':
+      remoteHasCube = msg.connected;
+      updateSplitMode();
+      break;
+    case 'camera':
+      lastRemoteCameraLat = msg.lat;
+      lastRemoteCameraLon = msg.lon;
+      if (remoteCameraSynced) {
+        twistyPlayerRemote.cameraLatitude = msg.lat;
+        twistyPlayerRemote.cameraLongitude = msg.lon;
+      }
+      break;
+    case 'challenge-scramble':
+      (async () => {
+        const algStr = msg.alg.join(' ');
+        const currentPattern = await twistyTracker.experimentalModel.currentPattern.get();
+        // Compute moves from current physical state to the challenge case.
+        // getScrambleToSolution gives the scramble needed to reach the alg's case from currentPattern.
+        const scramble = getScrambleToSolution(algStr, currentPattern);
+        const label = msg.name ? `Partner's case (${msg.name}): ` : 'Partner\'s case: ';
+        $('#alg-scramble-text').text(label + (scramble || '(already there!)'));
+        $('#alg-scramble').show();
+      })();
+      break;
+  }
+};
+
+netPeer.onConnected = () => {
+  $('#net-waiting').hide();
+  $('#net-status').text('Connected ✓').show();
+  $('#net-disconnect-btn').show();
+  $('#net-hosting-area').hide();
+  $('#net-join-area').hide();
+  $('#net-main-btns').hide();
+  // Send full local state to the newly connected peer
+  netPeer.send({
+    type: 'state',
+    alg: userAlg,
+    name: currentAlgName,
+    scramble: $('#alg-scramble-text').text(),
+    scrambleMode,
+    hasCube: !!conn,
+    moves: appliedPhysicalMoves.slice(),
+  });
+  // Send current camera orientation
+  (async () => {
+    const coords = await (twistyPlayer.experimentalModel as any)?.twistySceneModel?.orbitCoordinates?.get();
+    if (coords && netPeer.connected) {
+      netPeer.send({ type: 'camera', lat: coords.latitude, lon: coords.longitude });
+    }
+  })();
+  updateSplitMode();
+  updateRemoteDisplay();
+};
+
+netPeer.onDisconnected = () => {
+  remoteHasCube = false;
+  remoteAlgName = '';
+  remoteScramble = '';
+  remoteVisualMoveQueue.length = 0;
+  if (remoteVisualMoveTimer) { clearTimeout(remoteVisualMoveTimer); remoteVisualMoveTimer = null; }
+  twistyPlayerRemote.alg = '';
+  remoteCameraSynced = true;
+  remoteVantageReady = false;
+  $('#sync-camera-btn').hide();
+  updateSplitMode();
+  updateRemoteDisplay();
+  $('#net-status').text('Disconnected').show();
+  $('#net-disconnect-btn').hide();
+  $('#net-share-btn').prop('disabled', false).text('🔗 Share');
+  $('#net-join-btn').prop('disabled', false);
+  $('#net-hosting-area').hide();
+  $('#net-join-area').hide();
+  $('#net-main-btns').show();
+};
+
+netPeer.onError = (err) => {
+  $('#net-status').text(`Error: ${err}`).show();
+};
+
+// ── Net panel UI ──────────────────────────────────────────────────────────────
+
+$('#net-share-btn').on('click', async () => {
+  $('#net-share-btn').prop('disabled', true).text('…');
+  try {
+    const code = await netPeer.host();
+    $('#net-code').text(code);
+    $('#net-main-btns').hide();
+    $('#net-hosting-area').show();
+    $('#net-join-area').hide();
+    $('#net-waiting').show();
+  } catch {
+    $('#net-share-btn').prop('disabled', false).text('🔗 Share');
+  }
+});
+
+$('#net-join-toggle-btn').on('click', () => {
+  $('#net-main-btns').hide();
+  $('#net-join-area').show();
+  $('#net-join-input').val('').trigger('focus');
+});
+
+$('#net-join-cancel-btn').on('click', () => {
+  $('#net-join-area').hide();
+  $('#net-main-btns').show();
+});
+
+$('#net-copy-btn').on('click', () => {
+  const code = $('#net-code').text();
+  if (!code) return;
+  navigator.clipboard.writeText(code);
+  // Flash the code and icon
+  const $code = $('#net-code');
+  const $btn = $('#net-copy-btn');
+  $code.addClass('text-green-500 dark:text-green-400').removeClass('text-gray-900 dark:text-white');
+  $btn.text('✓').addClass('text-green-500 dark:text-green-400').removeClass('text-gray-500');
+  setTimeout(() => {
+    $code.removeClass('text-green-500 dark:text-green-400').addClass('text-gray-900 dark:text-white');
+    $btn.text('📋').removeClass('text-green-500 dark:text-green-400').addClass('text-gray-500');
+  }, 1000);
+});
+
+$('#net-cancel-btn').on('click', () => {
+  netPeer.disconnect();
+  $('#net-hosting-area').hide();
+  $('#net-main-btns').show();
+  $('#net-share-btn').prop('disabled', false).text('🔗 Share');
+});
+
+$('#net-paste-btn').on('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    const code = text.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    if (code) $('#net-join-input').val(code);
+  } catch { /* clipboard read denied */ }
+});
+
+// Auto-insert the dash when the user types the first digit (e.g. "TIGER4" → "TIGER-4").
+$('#net-join-input').on('input', function () {
+  const input = this as HTMLInputElement;
+  let val = input.value.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  // If there's no dash yet and we see a digit after letters, insert it
+  if (!val.includes('-')) {
+    const firstDigit = val.search(/[0-9]/);
+    if (firstDigit > 0) {
+      val = val.slice(0, firstDigit) + '-' + val.slice(firstDigit);
+    }
+  }
+  if (input.value !== val) input.value = val;
+});
+
+$('#net-join-btn').on('click', async () => {
+  const code = ($('#net-join-input').val() as string).trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  if (!code) return;
+  $('#net-status').text('Connecting…').show();
+  $('#net-join-btn').prop('disabled', true);
+  try {
+    await netPeer.join(code);
+    // onConnected fires via the data connection open event
+  } catch {
+    $('#net-status').text('Failed to connect').show();
+    $('#net-join-btn').prop('disabled', false);
+  }
+});
+
+$('#net-disconnect-btn').on('click', () => {
+  netPeer.disconnect();
+});
+
+$('#send-scramble-btn').on('click', () => {
+  if (netPeer.connected && userAlg.length > 0) {
+    netPeer.send({ type: 'challenge-scramble', alg: userAlg, name: currentAlgName });
+    $('#send-scramble-btn').text('📤 Sent!');
+    setTimeout(() => $('#send-scramble-btn').text('📤 Send Case'), 1500);
+  }
+});
+
+$('#sync-steps-btn').on('click', async () => {
+  // Compute moves to get from viewer's physical cube state to sharer's current cube state.
+  const myPattern = await twistyTracker.experimentalModel.currentPattern.get();
+  const remotePattern = await twistyPlayerRemote.experimentalModel.currentPattern.get();
+  const mySolve = min2phase.solve(patternToFacelets(fixOrientation(myPattern)));
+  const remoteSolve = min2phase.solve(patternToFacelets(fixOrientation(remotePattern)));
+  const inverseRemoteSolve = Alg.fromString(remoteSolve).invert().toString();
+  const combined = (mySolve + ' ' + inverseRemoteSolve).trim();
+  const syncScramble = Alg.fromString(combined).experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 }).toString().trim();
+  if (syncScramble) {
+    $('#alg-scramble-text').text('Sync: ' + syncScramble);
+  } else {
+    $('#alg-scramble-text').text('Already in sync!');
+  }
+  $('#alg-scramble').show();
+});
+
+$('#sync-camera-btn').on('click', () => {
+  remoteCameraSynced = true;
+  twistyPlayerRemote.cameraLatitude = lastRemoteCameraLat;
+  twistyPlayerRemote.cameraLongitude = lastRemoteCameraLon;
+  $('#sync-camera-btn').hide();
+});
+
+twistyPlayerRemote.addEventListener('pointerdown', () => {
+  if (netPeer.connected) {
+    remoteCameraSynced = false;
+    $('#sync-camera-btn').show();
+  }
+});
+
+// Subscribe to local cube camera changes to broadcast to peer.
+// orbitCoordinates lives on TwistySceneModel, not TwistyPlayerModel.
+{
+  const sceneModel = (twistyPlayer.experimentalModel as any)?.twistySceneModel;
+  sceneModel?.orbitCoordinates?.addFreshListener?.((coords: any) => {
+    if (!netPeer.connected) return;
+    const now = Date.now();
+    if (now - lastCamBroadcastTime < 100) return; // 10 fps cap
+    lastCamBroadcastTime = now;
+    netPeer.send({ type: 'camera', lat: coords.latitude, lon: coords.longitude });
+  });
+}
+
+// ── End network sharing ───────────────────────────────────────────────────────
+
 function resetAlg() {
   currentMoveIndex = -1; // Reset the move index
   badAlg = [];
@@ -326,6 +781,9 @@ $('#train-alg').on('click', () => {
     userAlg = expandNotation(algInput).split(/\s+/); // Split the input string into moves
     currentAlgName = checkedAlgorithms[0]?.name || '';
     $('#alg-display').text(userAlg.join(' ')); // Display the alg
+    appliedPhysicalMoves = [];
+    if (netPeer.connected) netPeer.send({ type: 'alg', alg: userAlg, name: currentAlgName });
+    updateRemoteDisplay();
     $('#alg-display-container').show();
     $('#timer').show();
     $('#alg-input').hide();
@@ -423,6 +881,7 @@ function drawAlgInCube() {
     $('#alg-display').text(userAlg.join(' '));
     scrambleToAlg = [];
   }
+  appliedPhysicalMoves = [];
   twistyPlayer.alg = Alg.fromString(userAlg.join(' ')).invert().toString();
 }
 
@@ -757,6 +1216,8 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
       enqueueVisualMove(remapMoveForPlayer(logicalMove));
     }
     twistyTracker.experimentalAddMove(event.move, { cancel: false });
+    appliedPhysicalMoves.push(logicalMove);
+    if (netPeer.connected) netPeer.send({ type: 'move', move: logicalMove });
 
     if (isFullSolveModeEnabled()) {
       fsOnPhysicalMove(logicalMove);
@@ -847,6 +1308,7 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
       }
 
       $('#alg-scramble-text').text(scramble);
+      if (netPeer.connected) netPeer.send({ type: 'scramble', text: scramble, mode: !!scramble });
 
       if (!scramble) {
         $('#alg-scramble').hide();
@@ -1160,6 +1622,7 @@ $('#alg-display').on('click', () => {
 
 $('#input-alg').on('click', () => {
   twistyPlayer.experimentalStickering = 'full';
+  appliedPhysicalMoves = [];
   twistyPlayer.alg = '';
   resetAlg();
   $('#alg-input').val('');
@@ -1211,6 +1674,7 @@ $('#device-info').on('click', () => {
 
 $('#reset-state').on('click', async () => {
   await conn?.sendCommand({ type: "REQUEST_RESET" });
+  appliedPhysicalMoves = [];
   twistyPlayer.alg = '';
   twistyTracker.alg = '';
   drawAlgInCube();
@@ -1226,7 +1690,9 @@ $('#header-reset-gyro').on('click', async () => {
 
 function deviceDisconnected() {
   conn = null;
+  if (netPeer.connected) netPeer.send({ type: 'cube-connected', connected: false });
   cubeStateInitialized = false;
+  appliedPhysicalMoves = [];
   twistyPlayer.alg = '';
   twistyTracker.alg = '';
   fsSetCubeConnected(false);
@@ -1290,6 +1756,7 @@ $('#connect-button').on('click', async () => {
   conn = newConn;
   conn.events$.subscribe(handleCubeEvent);
   fsSetCubeConnected(true);
+  if (netPeer.connected) netPeer.send({ type: 'cube-connected', connected: true });
   if (conn.capabilities.hardware) {
     await conn.sendCommand({ type: "REQUEST_HARDWARE" });
   }
@@ -1705,6 +2172,7 @@ $('#scramble-to').on('click', () => {
     let trackerReset = false;
     if (scramble === null) {
       // No short path from current state; reset tracker to solved so invAlg is the scramble
+      appliedPhysicalMoves = [];
       twistyTracker.alg = '';
       twistyPlayer.alg = '';  // sync synchronously to avoid a late async override
       trackerReset = true;
@@ -1801,6 +2269,7 @@ $('#category-select').on('change', () => {
   checkedAlgorithmsCopy = [];
   $('#select-all-subsets-toggle').prop('checked', false);
   // reset cube alg
+  appliedPhysicalMoves = [];
   twistyPlayer.alg = '';
   // selecting a new category should reset the current practice drill
   resetDrill();
@@ -1894,9 +2363,11 @@ function loadConfiguration() {
   if (hintFacelets) {
     hintFaceletsToggle.checked = hintFacelets === 'floating';
     twistyPlayer.hintFacelets = hintFacelets === 'floating' ? 'floating' : 'none';
+    twistyPlayerRemote.hintFacelets = hintFacelets === 'floating' ? 'floating' : 'none';
   } else {
     hintFaceletsToggle.checked = false;
     twistyPlayer.hintFacelets = 'none';
+    twistyPlayerRemote.hintFacelets = 'none';
   }
 
   const fullStickering = localStorage.getItem('fullStickering');
@@ -2029,6 +2500,7 @@ const hintFaceletsToggle = document.getElementById('hintFacelets-toggle') as HTM
 hintFaceletsToggle.addEventListener('change', () => {
   localStorage.setItem('hintFacelets', hintFaceletsToggle.checked ? 'floating' : 'none');
   twistyPlayer.hintFacelets = hintFaceletsToggle.checked ? 'floating' : 'none';
+  twistyPlayerRemote.hintFacelets = hintFaceletsToggle.checked ? 'floating' : 'none';
 });
 
 // Add event listener for the full sticker toggle
@@ -2038,9 +2510,11 @@ fullStickeringToggle.addEventListener('change', () => {
   localStorage.setItem('fullStickering', fullStickeringToggle.checked.toString());
   if (fullStickeringEnabled) {
     twistyPlayer.experimentalStickering = 'full';
+    twistyPlayerRemote.experimentalStickering = 'full';
   } else {
     let category = $('#category-select').val()?.toString().toLowerCase() || 'pll';
     setStickering(category);
+    twistyPlayerRemote.experimentalStickering = twistyPlayer.experimentalStickering;
   }
   if (!fullStickeringEnabled) {
     // Enforce dependency: if full stickering is disabled, white-on-bottom must be off.
@@ -2222,6 +2696,7 @@ function setAnimSpeed(speed: number) {
   if (quickAnimSpeedNumberEl) quickAnimSpeedNumberEl.value = speed.toFixed(2);
   twistyPlayer.tempoScale = 5 * speed;
   twistyTracker.tempoScale = 5 * speed;
+  twistyPlayerRemote.tempoScale = 5 * speed;
 }
 
 const storedAnimSpeed = parseFloat(localStorage.getItem('animSpeed') ?? '1');
@@ -2248,21 +2723,27 @@ $('#visualization-select').on('change', () => {
   switch (visualizationValue) {
     case '2D':
       twistyPlayer.visualization = '2D';
+      twistyPlayerRemote.visualization = '2D';
       break;
     case '3D':
       twistyPlayer.visualization = '3D';
+      twistyPlayerRemote.visualization = '3D';
       break;
     case 'PG3D':
       twistyPlayer.visualization = 'PG3D';
+      twistyPlayerRemote.visualization = 'PG3D';
       break;
     case 'experimental-2D-LL':
       twistyPlayer.visualization = 'experimental-2D-LL';
+      twistyPlayerRemote.visualization = 'experimental-2D-LL';
       break;
     case 'experimental-2D-LL-face':
       twistyPlayer.visualization = 'experimental-2D-LL-face';
+      twistyPlayerRemote.visualization = 'experimental-2D-LL-face';
       break;
     default:
       twistyPlayer.visualization = 'PG3D';
+      twistyPlayerRemote.visualization = 'PG3D';
   }
   // fix for 3D visualization not animating after visualization change
   if (conn && (visualizationValue as string).includes('3D')) {
