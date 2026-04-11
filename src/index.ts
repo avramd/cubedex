@@ -147,9 +147,80 @@ function cachePlasticMaterial() {
 const HOME_ORIENTATION = new THREE.Quaternion().setFromEuler(new THREE.Euler(15 * Math.PI / 180, -5 * Math.PI / 180, 0));
 var cubeQuaternion: THREE.Quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(15 * Math.PI / 180, -20 * Math.PI / 180, 0));
 
-const DR_LOCK_ORIENTATION = new THREE.Quaternion().setFromEuler(
+// Default locked orientation used when gyroscope is disabled.
+const DR_LOCK_BASE = new THREE.Quaternion().setFromEuler(
   new THREE.Euler(15 * Math.PI / 180, -20 * Math.PI / 180, 0)
 );
+
+// Persistent user orientation adjustment, modified by arcball drag.
+const ORIENT_ADJUST_KEY = 'orientAdjust';
+let orientAdjust: THREE.Quaternion = (() => {
+  try {
+    const s = localStorage.getItem(ORIENT_ADJUST_KEY);
+    if (s) {
+      const { x, y, z, w } = JSON.parse(s);
+      return new THREE.Quaternion(x, y, z, w).normalize();
+    }
+  } catch { /**/ }
+  return new THREE.Quaternion();
+})();
+
+// Arcball drag overlay — sits on top of the cube, lets the user drag to adjust
+// the resting orientation of the virtual cube.
+// Points inside the unit circle map to the front hemisphere; outside maps to the rim.
+function arcballProject(nx: number, ny: number): THREE.Vector3 {
+  const r2 = nx * nx + ny * ny;
+  if (r2 <= 1.0) return new THREE.Vector3(nx, ny, Math.sqrt(1.0 - r2));
+  const r = Math.sqrt(r2);
+  return new THREE.Vector3(nx / r, ny / r, 0);
+}
+
+if (cubeCellEl) {
+  cubeCellEl.style.position = 'relative';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:absolute;inset:0;cursor:grab;touch-action:none;z-index:10;';
+  cubeCellEl.appendChild(overlay);
+
+  let dragAnchor: THREE.Vector3 | null = null;
+
+  function pointerToArcball(e: PointerEvent): THREE.Vector3 {
+    const rect = overlay.getBoundingClientRect();
+    const radius = Math.min(rect.width, rect.height) / 2;
+    const nx = (e.clientX - rect.left - rect.width / 2) / radius;
+    const ny = -((e.clientY - rect.top - rect.height / 2) / radius);
+    return arcballProject(nx, ny);
+  }
+
+  overlay.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    dragAnchor = pointerToArcball(e);
+    overlay.setPointerCapture(e.pointerId);
+    overlay.style.cursor = 'grabbing';
+  });
+
+  overlay.addEventListener('pointermove', (e: PointerEvent) => {
+    if (!dragAnchor || !(e.buttons & 1)) return;
+    const end = pointerToArcball(e);
+    const axis = new THREE.Vector3().crossVectors(dragAnchor, end);
+    if (axis.lengthSq() < 1e-14) { dragAnchor = end; return; }
+    const angle = Math.acos(Math.max(-1, Math.min(1, dragAnchor.dot(end))));
+    const delta = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
+    orientAdjust.premultiply(delta);
+    dragAnchor = end;
+    try { localStorage.setItem(ORIENT_ADJUST_KEY, JSON.stringify(orientAdjust)); } catch { /**/ }
+  });
+
+  overlay.addEventListener('pointerup', (e: PointerEvent) => {
+    overlay.releasePointerCapture(e.pointerId);
+    overlay.style.cursor = 'grab';
+    dragAnchor = null;
+  });
+
+  overlay.addEventListener('pointercancel', () => {
+    dragAnchor = null;
+    overlay.style.cursor = 'grab';
+  });
+}
 
 async function amimateCubeOrientation() {
   if (!twistyScene || !twistyVantage || forceFix) {
@@ -170,7 +241,7 @@ async function amimateCubeOrientation() {
   if (gyroscopeEnabled) {
     twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
   } else {
-    twistyScene?.quaternion.slerp(DR_LOCK_ORIENTATION, 0.25);
+    twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
   }
 
   twistyVantage.render();
@@ -194,7 +265,7 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     if (!basis) {
       basis = quat.clone().conjugate();
     }
-    cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION));
+    cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
     $('#quaternion').val(`x: ${qx.toFixed(3)}, y: ${qy.toFixed(3)}, z: ${qz.toFixed(3)}, w: ${qw.toFixed(3)}`);
     if (event.velocity) {
       let { x: vx, y: vy, z: vz } = event.velocity;
