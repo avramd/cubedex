@@ -28,8 +28,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '24'
 
       # ── Compute BASE_PATH and deploy destination from the branch name ─────
       # main/master  → BASE_PATH=/cubedex/           dest=.  (root of gh-pages)
@@ -68,7 +67,7 @@ jobs:
           echo "| URL | ${DEPLOY_URL} |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build
         run: npm run build
