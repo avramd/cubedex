@@ -39,7 +39,7 @@ var twistyPlayer = new TwistyPlayer({
   controlPanel: 'none',
   viewerLink: 'none',
   hintFacelets: 'floating',
-  experimentalDragInput: 'auto',
+  experimentalDragInput: 'none',
   cameraLatitude: 0,
   cameraLongitude: 0,
   tempoScale: 5,
@@ -61,7 +61,63 @@ var twistyTracker = new TwistyPlayer({
   tempoScale: 5
 });
 
+const containerEl = document.getElementById('container') as HTMLElement | null;
+const cubeCellEl = document.getElementById('cube') as HTMLElement | null;
+
 $('#cube').append(twistyPlayer);
+
+// Arcball drag: Points inside the unit circle map to the front hemisphere;
+// outside maps to the rim (giving roll when dragging at the edges).
+function arcballProject(nx: number, ny: number): THREE.Vector3 {
+  const r2 = nx * nx + ny * ny;
+  if (r2 <= 1.0) return new THREE.Vector3(nx, ny, Math.sqrt(1.0 - r2));
+  const r = Math.sqrt(r2);
+  return new THREE.Vector3(nx / r, ny / r, 0);
+}
+
+if (cubeCellEl) {
+  cubeCellEl.style.touchAction = 'none';
+  (twistyPlayer as HTMLElement).style.cursor = 'grab';
+  let dragAnchor: THREE.Vector3 | null = null;
+
+  function pointerToArcball(e: PointerEvent): THREE.Vector3 {
+    const rect = cubeCellEl!.getBoundingClientRect();
+    const radius = Math.min(rect.width, rect.height) / 2;
+    const nx =  (e.clientX - rect.left - rect.width  / 2) / radius;
+    const ny = -((e.clientY - rect.top  - rect.height / 2) / radius);
+    return arcballProject(nx, ny);
+  }
+
+  cubeCellEl.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    dragAnchor = pointerToArcball(e);
+    cubeCellEl!.setPointerCapture(e.pointerId);
+    (twistyPlayer as HTMLElement).style.cursor = 'grabbing';
+  });
+
+  cubeCellEl.addEventListener('pointermove', (e: PointerEvent) => {
+    if (!dragAnchor || !(e.buttons & 1)) return;
+    const end = pointerToArcball(e);
+    const axis = new THREE.Vector3().crossVectors(dragAnchor, end);
+    if (axis.lengthSq() < 1e-14) { dragAnchor = end; return; }
+    const angle = Math.acos(Math.max(-1, Math.min(1, dragAnchor.dot(end))));
+    const delta = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
+    orientAdjust.premultiply(delta);
+    dragAnchor = end;
+    try { localStorage.setItem(ORIENT_ADJUST_KEY, JSON.stringify(orientAdjust)); } catch { /**/ }
+  });
+
+  cubeCellEl.addEventListener('pointerup', (e: PointerEvent) => {
+    cubeCellEl!.releasePointerCapture(e.pointerId);
+    (twistyPlayer as HTMLElement).style.cursor = 'grab';
+    dragAnchor = null;
+  });
+
+  cubeCellEl.addEventListener('pointercancel', () => {
+    dragAnchor = null;
+    (twistyPlayer as HTMLElement).style.cursor = 'grab';
+  });
+}
 
 var conn: SmartCubeConnection | null;
 
@@ -81,9 +137,6 @@ window.addEventListener('pagehide', () => {
 });
 
 let cubeSizePx: number = 400;
-
-const containerEl = document.getElementById('container') as HTMLElement | null;
-const cubeCellEl = document.getElementById('cube') as HTMLElement | null;
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const n = typeof value === 'string' ? Number.parseInt(value, 10) : (typeof value === 'number' ? value : Number.NaN);
@@ -165,62 +218,6 @@ let orientAdjust: THREE.Quaternion = (() => {
   return new THREE.Quaternion();
 })();
 
-// Arcball drag overlay — sits on top of the cube, lets the user drag to adjust
-// the resting orientation of the virtual cube.
-// Points inside the unit circle map to the front hemisphere; outside maps to the rim.
-function arcballProject(nx: number, ny: number): THREE.Vector3 {
-  const r2 = nx * nx + ny * ny;
-  if (r2 <= 1.0) return new THREE.Vector3(nx, ny, Math.sqrt(1.0 - r2));
-  const r = Math.sqrt(r2);
-  return new THREE.Vector3(nx / r, ny / r, 0);
-}
-
-if (cubeCellEl) {
-  cubeCellEl.style.position = 'relative';
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:absolute;inset:0;cursor:grab;touch-action:none;z-index:10;';
-  cubeCellEl.appendChild(overlay);
-
-  let dragAnchor: THREE.Vector3 | null = null;
-
-  function pointerToArcball(e: PointerEvent): THREE.Vector3 {
-    const rect = overlay.getBoundingClientRect();
-    const radius = Math.min(rect.width, rect.height) / 2;
-    const nx = (e.clientX - rect.left - rect.width / 2) / radius;
-    const ny = -((e.clientY - rect.top - rect.height / 2) / radius);
-    return arcballProject(nx, ny);
-  }
-
-  overlay.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (e.button !== 0) return;
-    dragAnchor = pointerToArcball(e);
-    overlay.setPointerCapture(e.pointerId);
-    overlay.style.cursor = 'grabbing';
-  });
-
-  overlay.addEventListener('pointermove', (e: PointerEvent) => {
-    if (!dragAnchor || !(e.buttons & 1)) return;
-    const end = pointerToArcball(e);
-    const axis = new THREE.Vector3().crossVectors(dragAnchor, end);
-    if (axis.lengthSq() < 1e-14) { dragAnchor = end; return; }
-    const angle = Math.acos(Math.max(-1, Math.min(1, dragAnchor.dot(end))));
-    const delta = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
-    orientAdjust.premultiply(delta);
-    dragAnchor = end;
-    try { localStorage.setItem(ORIENT_ADJUST_KEY, JSON.stringify(orientAdjust)); } catch { /**/ }
-  });
-
-  overlay.addEventListener('pointerup', (e: PointerEvent) => {
-    overlay.releasePointerCapture(e.pointerId);
-    overlay.style.cursor = 'grab';
-    dragAnchor = null;
-  });
-
-  overlay.addEventListener('pointercancel', () => {
-    dragAnchor = null;
-    overlay.style.cursor = 'grab';
-  });
-}
 
 async function amimateCubeOrientation() {
   if (!twistyScene || !twistyVantage || forceFix) {
