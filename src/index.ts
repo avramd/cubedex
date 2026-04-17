@@ -329,6 +329,7 @@ $('#train-alg').on('click', () => {
     $('#timer').show();
     $('#alg-input').hide();
     $('#save-container').hide();
+    $('#alg-stats').show();
     hideMistakes();
     if (scrambleMode && !alwaysScrambleTo) {
       $('#alg-scramble').hide();
@@ -1139,6 +1140,7 @@ $('#alg-display').on('click', () => {
   $('#left-side-inner').hide();
   $('#alg-input').get(0)?.focus();
   $('#app-top').show();
+  $('#alg-stats').show();
   $('#save-success').hide();
   $('#save-error').hide();
   let currentAlgName = checkedAlgorithms[0]?.name || '';
@@ -1171,6 +1173,7 @@ $('#input-alg').on('click', () => {
   $('#alg-input').show();
   $('#alg-input').get(0)?.focus();
   $('#app-top').show();
+  $('#alg-stats').show();
   $('#help').hide();
   $('#options-container').hide();
   $('#load-container').hide();
@@ -1632,6 +1635,7 @@ $('#delete-alg').on('click', () => {
 // Event listener for Cancel button
 $('#cancel-save').on('click', () => {
   $('#save-container').hide();
+  $('#alg-stats').show();
   $('#train-alg').trigger('click');
 });
 
@@ -1724,6 +1728,7 @@ $('#scramble-to').on('click', () => {
 // Event listener for Load button
 $('#load-alg').on('click', () => {
   $('#app-top').show();
+  $('#alg-stats').show();
   const categorySelect = $('#category-select');
   if (categorySelect.val() === null || categorySelect.val() === '') {
     loadCategories();
@@ -1749,6 +1754,7 @@ $('#save-alg').on('click', () => {
   $('#alg-input').show();
   $('#alg-input').get(0)?.focus();
   $('#app-top').show();
+  $('#alg-stats').hide();
   $('#save-success').hide();
   $('#save-error').hide();
   $('#save-container').show();
@@ -1836,6 +1842,7 @@ $('#import-file').on('change', (event) => {
 
 $('#show-options').on('click', () => {
   $('#app-top').hide();
+  $('#alg-stats').hide();
   $('#load-container').hide();
   $('#save-container').hide();
   $('#info').hide();
