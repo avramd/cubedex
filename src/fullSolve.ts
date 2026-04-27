@@ -1,7 +1,6 @@
 import { Alg } from 'cubing/alg';
 import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
-import { randomScrambleForEvent } from 'cubing/scramble';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
 
@@ -399,6 +398,26 @@ let graphChart: Chart | null = null;
 
 // ---------- Scramble precompute ----------
 
+// Generate a random-move 3x3 scramble locally (no Web Worker). Chooses
+// faces such that no two consecutive moves share a face, which avoids
+// trivial cancellations. Not random-state (true uniform distribution
+// requires a Kociemba-style solver, which cubing.js runs in a Worker —
+// avoided here because Vite's worker bundle pulls in DOM-touching code
+// from the main app and crashes with "document is not defined").
+function generateRandomScramble3x3(length = 25): string {
+  const faces = ['U', 'D', 'L', 'R', 'F', 'B'];
+  const suffixes = ['', "'", '2'];
+  const moves: string[] = [];
+  let prevFace = '';
+  for (let i = 0; i < length; i++) {
+    let face: string;
+    do { face = faces[Math.floor(Math.random() * 6)]; } while (face === prevFace);
+    moves.push(face + suffixes[Math.floor(Math.random() * 3)]);
+    prevFace = face;
+  }
+  return moves.join(' ');
+}
+
 function isHalfTurn(move: string): boolean {
   // Standard 3x3 face/wide turns ending with "2" (e.g., U2, F2, Rw2).
   return /^[A-Za-z]+w?2$/.test(move);
@@ -710,13 +729,7 @@ async function newScramble() {
     currentScramble = pendingScramble;
     pendingScramble = null;
   } else {
-    try {
-      const alg: Alg = await randomScrambleForEvent('333');
-      currentScramble = alg.toString();
-    } catch {
-      renderStatus('Scramble generation failed.');
-      return;
-    }
+    currentScramble = generateRandomScramble3x3();
   }
   const pre = precomputeScramblePatterns(currentScramble, start);
   scrambleMoves = pre.moves;
