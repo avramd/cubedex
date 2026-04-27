@@ -479,11 +479,14 @@ function renderStatsLegend() {
     const color = PHASE_COLORS[idx % PHASE_COLORS.length].replace('0.6', '1');
     items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${p.label}</span>`);
   });
+  const isDark = document.documentElement.classList.contains('dark');
+  const ao5Color = isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)';
+  const ao12Color = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
   if (prefs.graphAo5) {
-    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed rgba(0,0,0,0.75);flex-shrink:0"></span>Ao5</span>`);
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed ${ao5Color};flex-shrink:0"></span>Ao5</span>`);
   }
   if (prefs.graphAo12) {
-    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed rgba(0,0,0,0.45);flex-shrink:0"></span>Ao12</span>`);
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed ${ao12Color};flex-shrink:0"></span>Ao12</span>`);
   }
   el.innerHTML = items.join('');
 }
@@ -978,24 +981,35 @@ function renderGraph() {
     borderColor: PHASE_COLORS[kIdx % PHASE_COLORS.length].replace('0.6', '1'),
     borderWidth: 1,
     fill: kIdx === 0 ? 'origin' : '-1',
-    pointRadius: 0,
+    pointRadius: 2,
+    pointHoverRadius: 4,
+    pointBackgroundColor: PHASE_COLORS[kIdx % PHASE_COLORS.length].replace('0.6', '1'),
     tension: 0.15,
     order: 2,
+    // Allow point circles at data[0] and data[n-1] to render fully even
+    // though their centers sit at the chart-area edges.
+    clip: false,
   }));
 
   const totals = slice.map(r => r.totalMs / 1000);
+  const isDark = document.documentElement.classList.contains('dark');
+  const ao5Color = isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)';
+  const ao12Color = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
   if (prefs.graphAo5) {
     datasets.push({
       type: 'line' as const,
       label: 'Ao5',
       data: rollingAverage(totals, 5),
-      borderColor: 'rgba(0,0,0,0.75)',
+      borderColor: ao5Color,
       backgroundColor: 'transparent',
       borderDash: [4, 4],
       borderWidth: 1.5,
-      pointRadius: 0,
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      pointBackgroundColor: ao5Color,
       fill: false,
       order: 1,
+      clip: false,
     });
   }
   if (prefs.graphAo12) {
@@ -1003,13 +1017,16 @@ function renderGraph() {
       type: 'line' as const,
       label: 'Ao12',
       data: rollingAverage(totals, 12),
-      borderColor: 'rgba(0,0,0,0.45)',
+      borderColor: ao12Color,
       backgroundColor: 'transparent',
       borderDash: [2, 2],
       borderWidth: 1.5,
-      pointRadius: 0,
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      pointBackgroundColor: ao12Color,
       fill: false,
       order: 1,
+      clip: false,
     });
   }
 
@@ -1026,17 +1043,212 @@ function renderGraph() {
     delete yOpts.beginAtZero;
   }
 
+  // Format y-axis tick values as M:SS instead of raw seconds.
+  yOpts.ticks = {
+    ...(yOpts.ticks ?? {}),
+    callback: (value: number | string) => {
+      const total = Math.round(Number(value));
+      const m = Math.floor(total / 60);
+      const s = total - m * 60;
+      return `${m}:${String(s).padStart(2, '0')}`;
+    },
+  };
+
+  const formatSec = (sec: number) => {
+    const total = Math.max(0, sec);
+    if (total >= 60) {
+      const m = Math.floor(total / 60);
+      const s = total - m * 60;
+      return `${m}:${s.toFixed(2).padStart(5, '0')}`;
+    }
+    return total.toFixed(2);
+  };
+  const trendlineLabels = new Set(['Ao5', 'Ao12']);
+  const isDarkNow = document.documentElement.classList.contains('dark');
+  // Match the legend's body text color (text-gray-900 / dark:text-white).
+  const labelTextColor = isDarkNow ? '#ffffff' : '#111827';
+  const pillBg = isDarkNow ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.92)';
+
+  // Place label anchor y's such that no two are within `spacing` px, while
+  // keeping each label as close to its data-point y as possible. Labels that
+  // don't conflict with anyone (singletons in the merge graph) STAY at their
+  // exact y. Conflicting labels form clusters that get spread evenly with
+  // each cluster's offset chosen to minimise its max |displacement|.
+  // Pool-Adjacent-Violators with per-cluster centering.
+  const placeLabelsAvoidOverlap = (yTargets: number[], spacing: number): number[] => {
+    const n = yTargets.length;
+    if (n === 0) return [];
+    const indices = yTargets.map((_, i) => i).sort((a, b) => yTargets[a] - yTargets[b]);
+    type Cluster = { ys: number[]; p: number; size: number };
+    // Each label starts as its own cluster anchored at its exact y.
+    const clusters: Cluster[] = indices.map(i => ({ ys: [yTargets[i]], p: yTargets[i], size: 1 }));
+    let merged = true;
+    while (merged) {
+      merged = false;
+      for (let i = 0; i < clusters.length - 1; i++) {
+        const a = clusters[i];
+        const b = clusters[i + 1];
+        // a occupies [a.p, a.p + (a.size - 1) * spacing]; require
+        // b.p >= a.p + a.size * spacing for non-overlap.
+        if (b.p < a.p + a.size * spacing) {
+          const ys = a.ys.concat(b.ys);
+          const size = a.size + b.size;
+          let maxD = -Infinity, minD = Infinity;
+          for (let r = 0; r < size; r++) {
+            const d = ys[r] - r * spacing;
+            if (d > maxD) maxD = d;
+            if (d < minD) minD = d;
+          }
+          const p = (maxD + minD) / 2;
+          clusters.splice(i, 2, { ys, p, size });
+          merged = true;
+          break;
+        }
+      }
+    }
+    const out = new Array<number>(n);
+    let cursor = 0;
+    for (const c of clusters) {
+      for (let r = 0; r < c.size; r++) {
+        out[indices[cursor + r]] = c.p + r * spacing;
+      }
+      cursor += c.size;
+    }
+    return out;
+  };
+
+  // Custom plugin: on hover, draw per-phase split times at each line's data
+  // point — vertically de-overlapped, edge-flipped to stay inside the chart,
+  // and prefixed with a legend-style color chit.
+  const inlineSplitLabels = {
+    id: 'inlineSplitLabels',
+    afterDatasetsDraw(chart: any) {
+      const idx = chart.$activeIndex;
+      if (typeof idx !== 'number' || idx < 0) return;
+      const c2d: CanvasRenderingContext2D = chart.ctx;
+      c2d.save();
+      c2d.font = '11px ui-sans-serif, system-ui, sans-serif';
+      c2d.textBaseline = 'middle';
+      const padX = 4;
+      const padY = 2;
+      const chitSize = 10;
+      const chitGap = 4;
+      const lineHeight = 14;
+      const pillH = lineHeight + padY * 2;
+      const minSpacing = pillH + 2;
+
+      // First pass: collect the labels we intend to draw.
+      type Entry = {
+        text: string;
+        color: string;
+        isTrendline: boolean;
+        point: { x: number; y: number };
+        textW: number;
+      };
+      const entries: Entry[] = [];
+      chart.data.datasets.forEach((ds: any, dsIdx: number) => {
+        const meta = chart.getDatasetMeta(dsIdx);
+        const point = meta.data[idx];
+        if (!point) return;
+        const label = String(ds.label ?? '');
+        const isTrendline = trendlineLabels.has(label);
+        let valueSec: number | null = null;
+        if (isTrendline) {
+          const v = ds.data[idx];
+          if (typeof v !== 'number' || !Number.isFinite(v)) return;
+          valueSec = v;
+        } else {
+          const r = slice[idx];
+          const k = keyOrder[dsIdx];
+          if (!r || !k) return;
+          const ms = r.phases[k] ?? 0;
+          if (ms <= 0) return; // skip 0-duration phases
+          valueSec = ms / 1000;
+        }
+        const text = `${label} ${formatSec(valueSec)}`;
+        const textW = c2d.measureText(text).width;
+        entries.push({
+          text,
+          color: String(ds.borderColor ?? '#000'),
+          isTrendline,
+          point: { x: point.x, y: point.y },
+          textW,
+        });
+      });
+      if (entries.length === 0) { c2d.restore(); return; }
+
+      // De-overlap the y positions, centered to minimise max displacement.
+      const adjustedY = placeLabelsAvoidOverlap(entries.map(e => e.point.y), minSpacing);
+
+      const chartArea = chart.chartArea;
+      entries.forEach((e, i) => {
+        const totalW = chitSize + chitGap + e.textW;
+        const labelY = adjustedY[i];
+        // Default: place the label box to the right of the point, with the
+        // chit hugging the inside (point-facing) edge of the box.
+        let labelX = e.point.x + 8;
+        let chitOnLeft = true;
+        if (labelX + totalW + padX > chartArea.right - 2) {
+          // Near the right edge — flip whole label box to the inside-graph
+          // side (point-facing edge becomes the label's right side).
+          labelX = e.point.x - 8 - totalW;
+          chitOnLeft = false;
+        }
+
+        // Pill background.
+        c2d.fillStyle = pillBg;
+        c2d.fillRect(labelX - padX, labelY - pillH / 2, totalW + padX * 2, pillH);
+
+        const chitX = chitOnLeft ? labelX : labelX + e.textW + chitGap;
+        const textX = chitOnLeft ? labelX + chitSize + chitGap : labelX;
+
+        // Color chit (matches the legend representation).
+        if (e.isTrendline) {
+          c2d.strokeStyle = e.color;
+          c2d.lineWidth = 2;
+          c2d.setLineDash([4, 2]);
+          c2d.beginPath();
+          c2d.moveTo(chitX, labelY);
+          c2d.lineTo(chitX + chitSize, labelY);
+          c2d.stroke();
+          c2d.setLineDash([]);
+        } else {
+          c2d.fillStyle = e.color;
+          c2d.fillRect(chitX, labelY - chitSize / 2, chitSize, chitSize);
+        }
+
+        // Text in the legend's body color (theme-aware).
+        c2d.fillStyle = labelTextColor;
+        c2d.fillText(e.text, textX, labelY);
+      });
+      c2d.restore();
+    },
+  };
+
   if (graphChart) graphChart.destroy();
   graphChart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets },
+    plugins: [inlineSplitLabels],
     options: {
       responsive: true,
       animation: false,
       maintainAspectRatio: false,
-      // Suppress the chart-internal legend; we render our own legend in
-      // #stats-legend so the per-phase color key sits above the canvas.
-      plugins: { legend: { display: false } },
+      interaction: { mode: 'index', intersect: false },
+      events: ['mousemove', 'mouseout', 'click', 'touchstart', 'touchmove'],
+      onHover: (_e, elements, chart) => {
+        const newIdx = elements && elements.length > 0 ? elements[0].index : -1;
+        if ((chart as any).$activeIndex !== newIdx) {
+          (chart as any).$activeIndex = newIdx;
+          chart.draw();
+        }
+      },
+      // Suppress the chart-internal legend (we render our own) and the
+      // built-in tooltip block (replaced by the inline-label plugin).
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false },
+      },
       scales: {
         y: yOpts,
         x: { ticks: { autoSkip: true, maxRotation: 0 } },
@@ -1306,12 +1518,21 @@ function applyPrefsToUI() {
 export function initFullSolve() {
   wireEvents();
   applyPrefsToUI();
-  applyFullSolveMode();
+  // phaseSeq must be initialised BEFORE applyFullSolveMode, since the latter
+  // calls renderStatsLegend which builds the per-phase color key from phaseSeq.
   phaseSeq = currentPhaseSequence();
   phaseTimestamps = phaseSeq.map(() => null);
   phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
+  applyFullSolveMode();
   renderGraph();
   renderSolveList();
+  // Re-render the chart + legend when the user toggles dark mode so the
+  // Ao5/Ao12 trendlines pick up the new contrast colors.
+  new MutationObserver(() => {
+    if (!prefs.enabled) return;
+    renderGraph();
+    renderStatsLegend();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
 }
 
 export function fsOnPhysicalMove(move: string) {
