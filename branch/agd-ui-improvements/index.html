@@ -25,8 +25,9 @@
   <link rel="icon" type="image/png" sizes="16x16" href="/cubedex/branch/agd-ui-improvements/favicon-16x16.png" />
   <link rel="icon" type="image/svg+xml" href="/cubedex/branch/agd-ui-improvements/favicon.svg" />
   <link rel="icon" type="image/x-icon" href="/cubedex/branch/agd-ui-improvements/favicon.ico" />
-  <script type="module" crossorigin src="/cubedex/branch/agd-ui-improvements/assets/index-B_Twy8bG.js"></script>
-  <link rel="stylesheet" crossorigin href="/cubedex/branch/agd-ui-improvements/assets/index-CbZ9WEtE.css">
+  <script type="module" crossorigin src="/cubedex/branch/agd-ui-improvements/assets/index-DkFWnRjj.js"></script>
+  <link rel="modulepreload" crossorigin href="/cubedex/branch/agd-ui-improvements/assets/preload-helper-C6QgXcHC.js">
+  <link rel="stylesheet" crossorigin href="/cubedex/branch/agd-ui-improvements/assets/index-RGO5saj8.css">
 <link rel="manifest" href="/cubedex/branch/agd-ui-improvements/manifest.json"></head>
 
 <body class="bg-gray-100 text-gray-900 font-sans leading-relaxed sm:p-4 p-1 dark:bg-gray-900 dark:text-white text-sm sm:text-base flex flex-col min-h-screen min-w-[360px]">
@@ -381,6 +382,19 @@
       <div id="load-container" class="flex-col gap-4 mt-4 p-4 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md transition-colors duration-300 ease-in-out dark:bg-gray-700 dark:text-white dark:border-gray-700 text-sm sm:text-base">
         <div id="default-alg-id" class="hidden bg-red-400"><!-- wildcard to add classes used in js --></div>
 
+        <div class="flex items-center justify-end mb-2">
+          <div id="fs-no-cube" class="hidden mr-3 px-2 py-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300 border border-dashed border-gray-400 dark:border-gray-500 rounded">
+            No smartcube connected — turns won't be tracked, but you can still browse, copy, set, or delete scrambles.
+          </div>
+          <label for="full-solve-toggle" class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="full-solve-toggle" class="sr-only" />
+            <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
+            <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
+            <span class="ml-2 text-gray-900 dark:text-white font-semibold">Full Solve</span>
+          </label>
+        </div>
+
+        <div id="training-mode-content">
         <div class="block gap-2 sm:flex sm:flex-row">
           <div id="category-selector" class="max-w-[200px]">
             <label for="category-select" class="text-sm sm:text-base text-gray-900 block mb-2 dark:text-white">Category:</label>
@@ -469,6 +483,105 @@
           <button id="delete-times" disabled class="bg-blue-500 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out hover:bg-blue-700 disabled:bg-gray-400 disabled:text-gray-300 disabled:cursor-not-allowed text-sm sm:text-base">Delete Times</button>
         </div>
         <div id="delete-success" class="hidden mt-4 text-green-600 p-4 bg-gray-100 border border-gray-300 rounded-lg mb-4 dark:bg-gray-700 dark:text-green-500 dark:border-green-400 text-sm sm:text-base"></div>
+        </div><!-- /#training-mode-content -->
+
+        <div id="full-solve-content" class="hidden flex-col gap-4">
+          <div id="fs-main" class="flex flex-col gap-4">
+            <div class="flex flex-wrap gap-4 items-end">
+              <div>
+                <label for="fs-process-select" class="text-sm sm:text-base text-gray-900 block mb-1 dark:text-white">Process:</label>
+                <select id="fs-process-select" class="p-2 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md dark:bg-gray-600 dark:text-white dark:border-gray-700 focus:border-gray-400 text-sm sm:text-base">
+                  <option value="cfop">CFOP</option>
+                  <option value="beginner">Beginner</option>
+                </select>
+              </div>
+              <div>
+                <label for="fs-inspection-select" class="text-sm sm:text-base text-gray-900 block mb-1 dark:text-white">Inspection:</label>
+                <select id="fs-inspection-select" class="p-2 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md dark:bg-gray-600 dark:text-white dark:border-gray-700 focus:border-gray-400 text-sm sm:text-base">
+                  <option value="3">3 seconds</option>
+                  <option value="5">5 seconds</option>
+                  <option value="10">10 seconds</option>
+                  <option value="15" selected>15 seconds</option>
+                  <option value="pause">Pause</option>
+                </select>
+              </div>
+              <div id="fs-cfop-options" class="flex flex-wrap gap-4 items-center">
+                <label for="fs-twolook-oll-toggle" class="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" id="fs-twolook-oll-toggle" class="sr-only" />
+                  <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
+                  <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
+                  <span class="ml-2 text-gray-900 dark:text-white">2-look OLL</span>
+                </label>
+                <label for="fs-twolook-pll-toggle" class="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" id="fs-twolook-pll-toggle" class="sr-only" />
+                  <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
+                  <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
+                  <span class="ml-2 text-gray-900 dark:text-white">2-look PLL</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-xs text-gray-500 dark:text-gray-400">Scramble</div>
+                <div id="fs-scramble-display" class="font-mono text-base sm:text-lg break-words leading-relaxed"></div>
+              </div>
+              <button id="fs-new-scramble-btn" class="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs sm:text-sm whitespace-nowrap">New Scramble</button>
+            </div>
+
+            <div id="fs-timer" class="text-5xl sm:text-6xl font-mono text-center py-2 tabular-nums">0.00</div>
+            <div id="fs-status" class="text-center text-sm text-gray-600 dark:text-gray-300 min-h-[1.25rem]"></div>
+
+            <div class="flex flex-col gap-2">
+              <div>
+                <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Solution so far</div>
+                <div id="fs-solution-moves" class="font-mono text-sm min-h-[1.5rem] break-words w-full"></div>
+              </div>
+              <div>
+                <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Undo back to last checkpoint</div>
+                <div id="fs-retrace-hint" class="font-mono text-sm min-h-[1.5rem] break-words w-full text-blue-600 dark:text-blue-300"></div>
+              </div>
+            </div>
+
+            <div class="flex justify-center gap-2">
+              <button id="fs-pause-btn" class="bg-blue-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 text-sm sm:text-base disabled:bg-gray-400 disabled:cursor-not-allowed" disabled>Pause</button>
+              <button id="fs-abort-btn" class="bg-red-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-red-700 text-sm sm:text-base disabled:bg-gray-400 disabled:cursor-not-allowed" disabled>Abort</button>
+            </div>
+
+            <div id="fs-solve-list-container" class="mt-4">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="text-sm font-semibold">Past Solves</h3>
+                <span id="fs-solve-list-hint" class="text-xs text-gray-500 dark:text-gray-400"></span>
+              </div>
+              <div id="fs-solve-list" class="max-h-[320px] overflow-y-auto border border-gray-200 dark:border-gray-600 rounded-lg divide-y divide-gray-100 dark:divide-gray-700"></div>
+            </div>
+
+            <div id="fs-graph-controls" class="mt-4 flex flex-wrap items-center gap-4 text-xs sm:text-sm">
+              <label class="flex items-center gap-2">
+                <span>View last</span>
+                <input id="fs-graph-range" type="range" min="1" max="20" value="20" class="cursor-pointer" />
+                <span id="fs-graph-range-value" class="tabular-nums">20</span>
+                <span>solves</span>
+              </label>
+              <label class="flex items-center gap-2">
+                <span>Y-axis:</span>
+                <select id="fs-graph-yclip" class="p-1 border border-gray-400 rounded bg-white dark:bg-gray-600 dark:text-white dark:border-gray-700">
+                  <option value="1sd" selected>Clip at mean + 1σ</option>
+                  <option value="2sd">Clip at mean + 2σ</option>
+                  <option value="log">No clip (log Y)</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-1">
+                <input type="checkbox" id="fs-graph-ao5" checked class="form-checkbox h-4 w-4 text-blue-600" />
+                <span>Ao5</span>
+              </label>
+              <label class="flex items-center gap-1">
+                <input type="checkbox" id="fs-graph-ao12" checked class="form-checkbox h-4 w-4 text-blue-600" />
+                <span>Ao12</span>
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Hidden file input for importing algorithms -->
