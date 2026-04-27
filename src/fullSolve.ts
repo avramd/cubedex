@@ -370,6 +370,10 @@ let mode: Mode = 'idle';
 let cubeConnected = false;
 let cubeIsSolved = false;
 let pendingScramble: string | null = null;  // set by 🎯 install-as-next
+// Set of solve-record timestamps whose solutions the user has revealed
+// (default: every solve's solution is hidden until they click 👀). Keyed
+// by `ts` rather than array index so deletions don't shift state.
+const revealedSolveTimestamps = new Set<number>();
 
 // Scramble state
 let currentScramble: string = '';
@@ -580,42 +584,55 @@ function updateCfopOptionsVisibility() {
 function renderScrambleDisplay() {
   const el = fsScrambleEl();
   if (!el) return;
-  el.innerHTML = '';
-  scrambleMoves.forEach((m, i) => {
-    if (i < scrambleProgress) {
-      const span = document.createElement('span');
-      span.textContent = m + ' ';
-      span.className = 'text-gray-400 line-through';
-      el.appendChild(span);
-      return;
-    }
-    if (i === scrambleProgress && halfwayActive && isHalfTurn(m)) {
-      // Render "~~U~~2": strikethrough only on the letter portion, keep
-      // the trailing 2 normal. Whole token stays blue+bold to mark it as
-      // the current move.
-      const wrapper = document.createElement('span');
-      wrapper.className = 'font-bold text-blue-600 dark:text-blue-300';
-      const letterSpan = document.createElement('span');
-      letterSpan.textContent = m.slice(0, -1);
-      letterSpan.className = 'line-through';
-      wrapper.appendChild(letterSpan);
-      const numSpan = document.createElement('span');
-      numSpan.textContent = m.slice(-1) + ' ';
-      wrapper.appendChild(numSpan);
-      el.appendChild(wrapper);
-      return;
-    }
-    const span = document.createElement('span');
-    span.textContent = m + ' ';
-    span.className = i === scrambleProgress ? 'font-bold text-blue-600 dark:text-blue-300' : '';
-    el.appendChild(span);
-  });
+  el.replaceChildren();
+  // Walk the scramble in chunks of 4, wrapping each chunk in a .turn-group
+  // span. Each move span carries one of .clock / .c-clock / .double so
+  // the stylesheet can pad clockwise and half-turn moves; per-move
+  // styling (greyed-out for past, blue+bold for current) is added on
+  // top of the move-class as additional Tailwind classes.
+  for (let i = 0; i < scrambleMoves.length; i += 4) {
+    const group = document.createElement('span');
+    group.className = 'turn-group';
+    const chunk = scrambleMoves.slice(i, i + 4);
+    chunk.forEach((m, j) => {
+      const moveIdx = i + j;
+      const cls = moveClass(m);
+      let extra = '';
+      if (moveIdx < scrambleProgress) extra = 'text-gray-400 line-through';
+      else if (moveIdx === scrambleProgress) extra = 'font-bold text-blue-600 dark:text-blue-300';
+
+      if (moveIdx === scrambleProgress && halfwayActive && isHalfTurn(m)) {
+        // Render "~~U~~2": strikethrough only on the letter portion, keep
+        // the trailing 2 normal.
+        const wrapper = document.createElement('span');
+        wrapper.className = `${cls} ${extra}`.trim();
+        const letterSpan = document.createElement('span');
+        letterSpan.textContent = m.slice(0, -1);
+        letterSpan.className = 'line-through';
+        wrapper.appendChild(letterSpan);
+        const numSpan = document.createElement('span');
+        numSpan.textContent = m.slice(-1);
+        wrapper.appendChild(numSpan);
+        group.appendChild(wrapper);
+      } else {
+        const span = document.createElement('span');
+        span.className = `${cls} ${extra}`.trim();
+        span.textContent = m;
+        group.appendChild(span);
+      }
+    });
+    el.appendChild(group);
+    if (i + 4 < scrambleMoves.length) el.appendChild(document.createTextNode(' '));
+  }
   if (deviationMoves.length > 0) {
     const corr = document.createElement('span');
-    const inv = invertMoves(deviationMoves).join(' ');
     corr.className = 'text-red-500 font-bold ml-2';
-    corr.textContent = '— undo: ' + inv;
+    corr.textContent = '— undo: ';
     el.appendChild(corr);
+    const movesSpan = document.createElement('span');
+    movesSpan.className = 'text-red-500 font-bold';
+    setFormattedMoves(movesSpan, invertMoves(deviationMoves).join(' '));
+    el.appendChild(movesSpan);
   }
 }
 
@@ -685,7 +702,7 @@ function renderStatus(text: string) {
 
 function renderSolutionMoves() {
   const el = fsSolutionMovesEl();
-  if (el) el.textContent = formatMoveGroups(solveMoves.join(' '));
+  if (el) setFormattedMoves(el, solveMoves.join(' '));
 }
 
 function renderRetraceHint() {
@@ -693,10 +710,10 @@ function renderRetraceHint() {
   // (or since solve start), so the user can step back to that checkpoint.
   const el = fsRetraceHintEl();
   if (!el) return;
-  if (mode !== 'paused') { el.textContent = ''; return; }
+  if (mode !== 'paused') { el.replaceChildren(); return; }
   const checkpointIdx = lastReachedPhaseMoveIndex();
   const recent = solveMoves.slice(checkpointIdx);
-  el.textContent = formatMoveGroups(invertMoves(recent).join(' '));
+  setFormattedMoves(el, invertMoves(recent).join(' '));
 }
 
 function lastReachedPhaseMoveIndex(): number {
@@ -1386,15 +1403,36 @@ function meanAndSd(values: number[]): { mean: number; sd: number } {
 
 // ---------- Solve list ----------
 
-// Format a move sequence into groups of 4: spaces only between groups,
-// no spaces within a group. e.g.  "R U R' U' F2 R F'"  →  "RUR'U' F2RF'"
-function formatMoveGroups(seq: string): string {
+
+// Move-token typology. Used as a CSS class so the stylesheet can give
+// .clock and .double a tiny right-padding when they aren't the last
+// child of a .turn-group; .c-clock's apostrophe already provides its
+// own visual separation, so it gets no padding.
+function moveClass(m: string): 'clock' | 'c-clock' | 'double' {
+  if (m.endsWith('2')) return 'double';
+  if (m.endsWith("'")) return 'c-clock';
+  return 'clock';
+}
+
+// Replace the contents of `target` with a chunked move display: each
+// 4-move chunk is wrapped in a .turn-group span, and each move inside
+// gets one of .clock / .c-clock / .double. A regular space separates
+// chunks; intra-chunk spacing comes from the .turn-group CSS rule.
+function setFormattedMoves(target: HTMLElement, seq: string): void {
+  target.replaceChildren();
   const moves = seq.trim().split(/\s+/).filter(Boolean);
-  const groups: string[] = [];
   for (let i = 0; i < moves.length; i += 4) {
-    groups.push(moves.slice(i, i + 4).join(''));
+    const group = document.createElement('span');
+    group.className = 'turn-group';
+    for (const m of moves.slice(i, i + 4)) {
+      const span = document.createElement('span');
+      span.className = moveClass(m);
+      span.textContent = m;
+      group.appendChild(span);
+    }
+    target.appendChild(group);
+    if (i + 4 < moves.length) target.appendChild(document.createTextNode(' '));
   }
-  return groups.join(' ');
 }
 
 function renderSolveList() {
@@ -1409,11 +1447,7 @@ function renderSolveList() {
     return;
   }
   const hint = fsSolveListHintEl();
-  if (hint) {
-    hint.textContent = cubeIsSolved
-      ? 'Cube solved — solutions visible below.'
-      : 'Solve your cube to reveal solutions.';
-  }
+  if (hint) hint.textContent = '';
   rev.forEach((r, idx) => {
     const originalIndex = history.length - idx; // 1-based
     const realIdx = history.length - 1 - idx;
@@ -1434,7 +1468,7 @@ function renderSolveList() {
     const scramble = document.createElement('div');
     scramble.className = 'flex-1 font-mono text-gray-600 dark:text-gray-300 truncate';
     scramble.title = r.scramble;
-    scramble.textContent = formatMoveGroups(r.scramble);
+    setFormattedMoves(scramble, r.scramble);
     row.appendChild(scramble);
 
     // Action icons: pack tightly with no inter-button gap; rely on px padding inside each.
@@ -1466,6 +1500,21 @@ function renderSolveList() {
       void newScramble();
     });
     actions.appendChild(targetBtn);
+
+    // 👀 / 🙈 toggles whether this row's recorded solution is shown below.
+    // Each row starts hidden; click reveals.
+    const eyeBtn = document.createElement('button');
+    const isRevealed = revealedSolveTimestamps.has(r.ts);
+    eyeBtn.className = iconBtnClass;
+    eyeBtn.textContent = isRevealed ? '🙈' : '👀';
+    eyeBtn.title = isRevealed ? 'Hide solution' : 'Show solution';
+    eyeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (revealedSolveTimestamps.has(r.ts)) revealedSolveTimestamps.delete(r.ts);
+      else revealedSolveTimestamps.add(r.ts);
+      renderSolveList();
+    });
+    actions.appendChild(eyeBtn);
 
     const trashBtn = document.createElement('button');
     trashBtn.className = iconBtnClass;
@@ -1507,10 +1556,10 @@ function renderSolveList() {
     row.appendChild(actions);
     listEl.appendChild(row);
 
-    if (cubeIsSolved && r.solution) {
+    if (revealedSolveTimestamps.has(r.ts) && r.solution) {
       const sol = document.createElement('div');
       sol.className = 'pl-10 pr-2 pb-2 font-mono text-[11px] text-gray-500 dark:text-gray-400 break-words';
-      sol.textContent = formatMoveGroups(r.solution);
+      setFormattedMoves(sol, r.solution);
       listEl.appendChild(sol);
     }
   });

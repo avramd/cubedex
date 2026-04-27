@@ -63,3 +63,13 @@ input:checked + div + .dot {
 #quick-settings-panel input:checked + div + .dot {
   transform: translate(1.25rem, -50%);
 }
+
+/* Move-display chunking. Each scramble/solution chunk is a .turn-group
+ * span; each move inside is .clock (no suffix), .c-clock (' suffix), or
+ * .double (2 suffix). Clockwise and half-turns get a tiny right-padding
+ * to separate them from the next move within the chunk; the apostrophe
+ * on a counter-clockwise turn already provides visual separation. */
+.turn-group .clock:not(:last-child),
+.turn-group .double:not(:last-child) {
+  padding-right: 2px;
+}

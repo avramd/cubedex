@@ -764,6 +764,10 @@ video {
   margin-left: 1.5rem;
 }
 
+.ml-auto {
+  margin-left: auto;
+}
+
 .mr-1 {
   margin-right: 0.25rem;
 }
@@ -826,6 +830,10 @@ video {
 
 .grid {
   display: grid;
+}
+
+.contents {
+  display: contents;
 }
 
 .hidden {
@@ -1056,6 +1064,10 @@ video {
 
 .flex-wrap {
   flex-wrap: wrap;
+}
+
+.items-start {
+  align-items: flex-start;
 }
 
 .items-end {
@@ -1390,9 +1402,9 @@ video {
   font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }
 
-.text-5xl {
-  font-size: 3rem;
-  line-height: 1;
+.text-2xl {
+  font-size: 1.5rem;
+  line-height: 2rem;
 }
 
 .text-\[11px\] {
@@ -1694,6 +1706,17 @@ input:checked + div + .dot {
   transform: translate(1.25rem, -50%);
 }
 
+/* Move-display chunking. Each scramble/solution chunk is a .turn-group
+ * span; each move inside is .clock (no suffix), .c-clock (' suffix), or
+ * .double (2 suffix). Clockwise and half-turns get a tiny right-padding
+ * to separate them from the next move within the chunk; the apostrophe
+ * on a counter-clockwise turn already provides visual separation. */
+
+.turn-group .clock:not(:last-child),
+.turn-group .double:not(:last-child) {
+  padding-right: 2px;
+}
+
 .hover\:bg-blue-100:hover {
   --tw-bg-opacity: 1;
   background-color: rgb(219 234 254 / var(--tw-bg-opacity, 1));
@@ -1988,9 +2011,9 @@ input:checked + div + .dot {
     padding-top: 1rem;
   }
 
-  .sm\:text-6xl {
-    font-size: 3.75rem;
-    line-height: 1;
+  .sm\:text-3xl {
+    font-size: 1.875rem;
+    line-height: 2.25rem;
   }
 
   .sm\:text-base {
