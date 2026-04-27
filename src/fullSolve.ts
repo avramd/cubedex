@@ -1209,17 +1209,20 @@ function renderGraph() {
 
       if (entries.length === 0) { c2d.restore(); return; }
 
-      // De-overlap the y positions, centered to minimise max displacement.
-      const adjustedY = placeLabelsAvoidOverlap(entries.map(e => e.point.y), minSpacing);
+      // Split entries into two groups for two-sided layout: phase labels
+      // (with color chits) and chit-less labels (Solve total + Ao5/Ao12).
+      // Each group de-overlaps independently so they form their own tidy
+      // vertical stack on each side of the column guide.
+      const phaseEntries = entries.filter(e => !e.noChit);
+      const chitlessEntries = entries.filter(e => e.noChit);
+      const phaseY = placeLabelsAvoidOverlap(phaseEntries.map(e => e.point.y), minSpacing);
+      const chitlessY = placeLabelsAvoidOverlap(chitlessEntries.map(e => e.point.y), minSpacing);
 
       const chartArea = chart.chartArea;
-      const chartMidX = (chartArea.left + chartArea.right) / 2;
+      const hoverX = (phaseEntries[0] ?? chitlessEntries[0])?.point.x;
 
-      // Subtle vertical guide on the hovered column so it's unambiguous
-      // which solve the inline labels belong to (especially helpful for
-      // the second-to-last column where labels otherwise sit between
-      // this solve's points and the next solve's points).
-      const hoverX = entries[0]?.point.x;
+      // Subtle vertical guide on the hovered column so the labels on each
+      // side of it are unambiguously anchored to this solve.
       if (typeof hoverX === 'number') {
         c2d.save();
         c2d.strokeStyle = isDarkNow ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)';
@@ -1233,32 +1236,42 @@ function renderGraph() {
         c2d.restore();
       }
 
-      entries.forEach((e, i) => {
+      // Side selection. Default split: phase labels on whichever side has
+      // more horizontal room; chit-less labels on the opposite side. If
+      // there isn't enough room on the chit-less side, stack chit-less
+      // OUTBOARD of phase (i.e., further from the data point) on the same
+      // side. Phase always wins the closer-to-data-point side.
+      const padOuter = 10;
+      const rightAvail = (hoverX !== undefined) ? (chartArea.right - hoverX - padOuter) : 0;
+      const leftAvail = (hoverX !== undefined) ? (hoverX - chartArea.left - padOuter) : 0;
+      const phaseMaxW = phaseEntries.length
+        ? Math.max(...phaseEntries.map(e => chitSize + chitGap + e.textW))
+        : 0;
+      const chitlessMaxW = chitlessEntries.length
+        ? Math.max(...chitlessEntries.map(e => e.textW))
+        : 0;
+
+      let phaseSide: 'L' | 'R' = rightAvail >= leftAvail ? 'R' : 'L';
+      let chitlessSide: 'L' | 'R' = phaseSide === 'R' ? 'L' : 'R';
+      let chitlessOffset = 0;
+      const sideAvail = (s: 'L' | 'R') => (s === 'R' ? rightAvail : leftAvail);
+      if (chitlessMaxW > sideAvail(chitlessSide)) {
+        // Not enough room on the opposite side — fall back to the same side
+        // as phase, outboard (further out from the data point).
+        chitlessSide = phaseSide;
+        chitlessOffset = phaseMaxW + 8;
+      }
+
+      const renderEntry = (e: Entry, labelY: number, side: 'L' | 'R', extra: number) => {
         const totalW = e.noChit ? e.textW : chitSize + chitGap + e.textW;
-        const labelY = adjustedY[i];
-        // Default to the side of the data point that has more chart space:
-        // labels go right when the point is in the LEFT half of the chart,
-        // and left when in the right half. This keeps labels for the
-        // second-to-last solve from spilling toward the last solve's
-        // column. Each direction has a fallback to the other side if it
-        // would overflow the chart area.
-        const preferRight = e.point.x < chartMidX;
         let labelX: number;
         let chitOnLeft: boolean;
-        if (preferRight) {
-          labelX = e.point.x + 8;
+        if (side === 'R') {
+          labelX = e.point.x + 8 + extra;
           chitOnLeft = true;
-          if (labelX + totalW + padX > chartArea.right - 2) {
-            labelX = e.point.x - 8 - totalW;
-            chitOnLeft = false;
-          }
         } else {
-          labelX = e.point.x - 8 - totalW;
+          labelX = e.point.x - 8 - extra - totalW;
           chitOnLeft = false;
-          if (labelX - padX < chartArea.left + 2) {
-            labelX = e.point.x + 8;
-            chitOnLeft = true;
-          }
         }
 
         // Pill background.
@@ -1269,7 +1282,6 @@ function renderGraph() {
         if (!e.noChit) {
           const chitX = chitOnLeft ? labelX : labelX + e.textW + chitGap;
           textX = chitOnLeft ? labelX + chitSize + chitGap : labelX;
-          // Color chit (matches the legend representation).
           if (e.isTrendline) {
             c2d.strokeStyle = e.color;
             c2d.lineWidth = 2;
@@ -1285,9 +1297,6 @@ function renderGraph() {
           }
         }
 
-        // Text. Default in the legend's body color (theme-aware). For
-        // trendlines (no chit), colour just the numeric value with the
-        // line's colour so it doubles as the line indicator.
         if (e.isTrendline) {
           const sp = e.text.lastIndexOf(' ');
           const labelPart = sp >= 0 ? e.text.slice(0, sp + 1) : '';
@@ -1301,7 +1310,11 @@ function renderGraph() {
           c2d.fillStyle = labelTextColor;
           c2d.fillText(e.text, textX, labelY);
         }
-      });
+      };
+
+      phaseEntries.forEach((e, i) => renderEntry(e, phaseY[i], phaseSide, 0));
+      chitlessEntries.forEach((e, i) => renderEntry(e, chitlessY[i], chitlessSide, chitlessOffset));
+
       c2d.restore();
     },
   };
