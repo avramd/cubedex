@@ -374,6 +374,10 @@ let pendingScramble: string | null = null;  // set by 🎯 install-as-next
 // (default: every solve's solution is hidden until they click 👀). Keyed
 // by `ts` rather than array index so deletions don't shift state.
 const revealedSolveTimestamps = new Set<number>();
+// Subset of `revealedSolveTimestamps` whose solutions are currently rendered
+// in expanded mode (same-face redundancies struck through with their
+// equivalent single move in italics).
+const expandedSolveTimestamps = new Set<number>();
 
 // Scramble state
 let currentScramble: string = '';
@@ -631,7 +635,7 @@ function renderScrambleDisplay() {
     el.appendChild(corr);
     const movesSpan = document.createElement('span');
     movesSpan.className = 'text-red-500 font-bold';
-    setFormattedMoves(movesSpan, invertMoves(deviationMoves).join(' '));
+    setFormattedMoves(movesSpan, collapseDoubles(invertMoves(deviationMoves)).join(' '));
     el.appendChild(movesSpan);
   }
 }
@@ -702,7 +706,7 @@ function renderStatus(text: string) {
 
 function renderSolutionMoves() {
   const el = fsSolutionMovesEl();
-  if (el) setFormattedMoves(el, solveMoves.join(' '));
+  if (el) setFormattedMoves(el, collapseDoubles(solveMoves).join(' '));
 }
 
 function renderRetraceHint() {
@@ -713,7 +717,7 @@ function renderRetraceHint() {
   if (mode !== 'paused') { el.replaceChildren(); return; }
   const checkpointIdx = lastReachedPhaseMoveIndex();
   const recent = solveMoves.slice(checkpointIdx);
-  setFormattedMoves(el, invertMoves(recent).join(' '));
+  setFormattedMoves(el, collapseDoubles(invertMoves(recent)).join(' '));
 }
 
 function lastReachedPhaseMoveIndex(): number {
@@ -935,7 +939,11 @@ function finishSolve() {
   const record: SolveRecord = {
     ts: Date.now(),
     scramble: currentScramble,
-    solution: solveMoves.join(' '),
+    // Pair-collapse identical-quarter-turn pairs at save time so storage
+    // reads "U2" instead of "U U" when the solver did a half-turn as two
+    // physical events. The display layer can still re-derive a richer
+    // "expanded" view that calls out longer same-face redundancies.
+    solution: collapseDoubles(solveMoves).join(' '),
     totalMs,
     phases,
     process: prefs.process,
@@ -1414,6 +1422,47 @@ function moveClass(m: string): 'clock' | 'c-clock' | 'double' {
   return 'clock';
 }
 
+// The face component of a move ("R", "Rw", "U", etc.) — i.e., everything
+// before the optional "'" / "2" suffix. Same-face moves can be merged
+// algebraically modulo 4 quarter-turns.
+function getFace(m: string): string {
+  const match = m.match(/^[A-Za-z]+/);
+  return match ? match[0] : m;
+}
+
+// Sum the quarter-turn count of a same-face move sequence, mod 4.
+//   R = +1, R2 = +2, R' = -1
+function sumQuarters(moves: string[]): number {
+  let n = 0;
+  for (const m of moves) {
+    if (m.endsWith('2')) n += 2;
+    else if (m.endsWith("'")) n -= 1;
+    else n += 1;
+  }
+  return ((n % 4) + 4) % 4;
+}
+
+// Collapse adjacent quarter-turn pairs of the same move into a single
+// half-turn. Smartcubes report half-turns as two consecutive quarter-
+// turn events (so a user U2 lands as ['U', 'U']) — collapsing gives a
+// readable display without affecting how solves are stored. Already-
+// collapsed half-turns and mixed pairs (e.g., R R') are left alone.
+function collapseDoubles(moves: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < moves.length; i++) {
+    const m = moves[i];
+    if (i + 1 < moves.length && m === moves[i + 1] && !m.endsWith('2')) {
+      // R + R = R2;  R' + R' = R2 (also written R'2 but R2 is canonical).
+      const face = m.endsWith("'") ? m.slice(0, -1) : m;
+      out.push(face + '2');
+      i++; // skip the second of the pair
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
 // Replace the contents of `target` with a chunked move display: each
 // 4-move chunk is wrapped in a .turn-group span, and each move inside
 // gets one of .clock / .c-clock / .double. A regular space separates
@@ -1432,6 +1481,111 @@ function setFormattedMoves(target: HTMLElement, seq: string): void {
     }
     target.appendChild(group);
     if (i + 4 < moves.length) target.appendChild(document.createTextNode(' '));
+  }
+}
+
+// Render a stored solve into the past-solves DOM, applying same-face
+// reduction. Two display modes:
+//   showStrikes = false (collapsed / accordion folded — default):
+//     redundant moves are HIDDEN entirely. Only "real" moves and italic
+//     equivalent-turn replacements are shown.
+//   showStrikes = true  (expanded / accordion open):
+//     redundant moves are shown with strike-through, alongside the
+//     same reals and replacements.
+//
+// Chunking is a fixed 4 RELEVANT moves per .turn-group regardless of
+// mode (relevant = real + italic-replacement; strikes are decorative
+// and never counted), so chunk-spaces sit at the same logical position
+// in both modes.
+function renderSolutionView(target: HTMLElement, moves: string[], showStrikes: boolean): void {
+  target.replaceChildren();
+
+  // Pass 1: classify each storage move.
+  //   strike      → cancelled; rendered struck-through (or hidden if !showStrikes)
+  //   replacement → if set, append an italic equivalent-turn move after this
+  //                 storage move (used when no original in a same-face group
+  //                 already equals the group's net rotation)
+  type Render = { strike: boolean; replacement: string | null };
+  const renders: Render[] = moves.map(() => ({ strike: false, replacement: null }));
+
+  let i = 0;
+  while (i < moves.length) {
+    const face = getFace(moves[i]);
+    let j = i;
+    while (j < moves.length && getFace(moves[j]) === face) j++;
+    if (j - i >= 2) {
+      const groupMoves = moves.slice(i, j);
+      const netCount = sumQuarters(groupMoves);
+      const netMove = netCount === 1 ? face : netCount === 2 ? face + '2' : netCount === 3 ? face + "'" : null;
+
+      // Self-replacement: prefer keeping a move that already equals the
+      // net rotation (LAST occurrence) instead of striking everything and
+      // adding an italic duplicate. Strikes the rest.
+      let keepAt = -1;
+      if (netMove !== null) {
+        for (let k = j - 1; k >= i; k--) {
+          if (moves[k] === netMove) { keepAt = k; break; }
+        }
+      }
+
+      if (keepAt >= 0) {
+        for (let k = i; k < j; k++) {
+          if (k !== keepAt) renders[k].strike = true;
+        }
+      } else {
+        for (let k = i; k < j; k++) renders[k].strike = true;
+        if (netMove !== null) renders[j - 1].replacement = netMove;
+      }
+    }
+    i = j;
+  }
+
+  // Pass 2: emit tokens (real / strike / italic) in storage order; chunk
+  // by 4 RELEVANT (real + italic) tokens. Strikes are passed through but
+  // never increment the chunk count — when !showStrikes they're skipped
+  // entirely.
+  let group: HTMLElement | null = null;
+  let countInChunk = 0;
+  const ensureGroup = () => {
+    if (!group) {
+      if (target.childNodes.length > 0) target.appendChild(document.createTextNode(' '));
+      group = document.createElement('span');
+      group.className = 'turn-group';
+      target.appendChild(group);
+      countInChunk = 0;
+    }
+  };
+
+  for (let k = 0; k < moves.length; k++) {
+    const m = moves[k];
+    const r = renders[k];
+    if (r.strike) {
+      if (showStrikes) {
+        ensureGroup();
+        const span = document.createElement('span');
+        span.className = `${moveClass(m)} line-through text-gray-400 dark:text-gray-500`;
+        span.textContent = m;
+        group!.appendChild(span);
+      }
+    } else {
+      ensureGroup();
+      const span = document.createElement('span');
+      span.className = moveClass(m);
+      span.textContent = m;
+      group!.appendChild(span);
+      countInChunk++;
+      if (countInChunk >= 4) group = null;
+    }
+    if (r.replacement) {
+      ensureGroup();
+      const repSpan = document.createElement('span');
+      repSpan.className = `${moveClass(r.replacement)} equivalent-turn`;
+      repSpan.title = 'Collapsed into Equivalent Turn';
+      repSpan.textContent = r.replacement;
+      group!.appendChild(repSpan);
+      countInChunk++;
+      if (countInChunk >= 4) group = null;
+    }
   }
 }
 
@@ -1506,7 +1660,7 @@ function renderSolveList() {
     const eyeBtn = document.createElement('button');
     const isRevealed = revealedSolveTimestamps.has(r.ts);
     eyeBtn.className = iconBtnClass;
-    eyeBtn.textContent = isRevealed ? '🙈' : '👀';
+    eyeBtn.textContent = isRevealed ? '🫣' : '👀';
     eyeBtn.title = isRevealed ? 'Hide solution' : 'Show solution';
     eyeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1515,6 +1669,25 @@ function renderSolveList() {
       renderSolveList();
     });
     actions.appendChild(eyeBtn);
+
+    // 🪗 toggles between the default (storage-form) display and the
+    // expanded view that strikes through same-face groups and italicises
+    // their net-equivalent move. The accordion icon itself is shown
+    // strike-through when collapsed (squished, hiding the redundancies)
+    // and unstruck when expanded (the bellows are open).
+    const expandBtn = document.createElement('button');
+    const isExpanded = expandedSolveTimestamps.has(r.ts);
+    expandBtn.className = `${iconBtnClass}${isExpanded ? '' : ' line-through'}`;
+    expandBtn.textContent = '🪗';
+    expandBtn.title = 'expand/collapse redundant turns';
+    expandBtn.disabled = !isRevealed;
+    expandBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (expandedSolveTimestamps.has(r.ts)) expandedSolveTimestamps.delete(r.ts);
+      else expandedSolveTimestamps.add(r.ts);
+      renderSolveList();
+    });
+    actions.appendChild(expandBtn);
 
     const trashBtn = document.createElement('button');
     trashBtn.className = iconBtnClass;
@@ -1559,7 +1732,13 @@ function renderSolveList() {
     if (revealedSolveTimestamps.has(r.ts) && r.solution) {
       const sol = document.createElement('div');
       sol.className = 'pl-10 pr-2 pb-2 font-mono text-[11px] text-gray-500 dark:text-gray-400 break-words';
-      setFormattedMoves(sol, r.solution);
+      // Always feed the renderer a pair-collapsed move list — new records
+      // are stored that way; older records may still be raw, in which case
+      // we collapse on the fly so both views look consistent.
+      const collapsed = collapseDoubles(r.solution.trim().split(/\s+/).filter(Boolean));
+      // Same renderer for both modes: the accordion icon controls whether
+      // the redundant moves are visible (struck through) or hidden.
+      renderSolutionView(sol, collapsed, expandedSolveTimestamps.has(r.ts));
       listEl.appendChild(sol);
     }
   });

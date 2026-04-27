@@ -1147,8 +1147,8 @@ video {
   overflow: hidden;
 }
 
-.overflow-y-auto {
-  overflow-y: auto;
+.overflow-y-scroll {
+  overflow-y: scroll;
 }
 
 .truncate {
@@ -1448,6 +1448,10 @@ video {
   text-transform: lowercase;
 }
 
+.italic {
+  font-style: italic;
+}
+
 .tabular-nums {
   --tw-numeric-spacing: tabular-nums;
   font-variant-numeric: var(--tw-ordinal) var(--tw-slashed-zero) var(--tw-numeric-figure) var(--tw-numeric-spacing) var(--tw-numeric-fraction);
@@ -1715,6 +1719,14 @@ input:checked + div + .dot {
 .turn-group .clock:not(:last-child),
 .turn-group .double:not(:last-child) {
   padding-right: 2px;
+}
+
+/* In the expanded-solution view, an italic span representing the move
+ * that a same-face group reduces to. Carries a tooltip via the title
+ * attribute set in JS. */
+
+.equivalent-turn {
+  font-style: italic;
 }
 
 .hover\:bg-blue-100:hover {
