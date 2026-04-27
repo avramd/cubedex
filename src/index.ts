@@ -26,6 +26,7 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
+import { initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, isFullSolveModeEnabled } from './fullSolve';
 import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled } from './functions';
 
 const SOLVED_STATE = "UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB";
@@ -757,6 +758,10 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     }
     twistyTracker.experimentalAddMove(event.move, { cancel: false });
 
+    if (isFullSolveModeEnabled()) {
+      fsOnPhysicalMove(logicalMove);
+    }
+
     if (scrambleMode) {
 
       const cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
@@ -1224,6 +1229,7 @@ function deviceDisconnected() {
   cubeStateInitialized = false;
   twistyPlayer.alg = '';
   twistyTracker.alg = '';
+  fsSetCubeConnected(false);
   releaseWakeLock();
   $('#reset-gyro').prop('disabled', true);
   $('#reset-state').prop('disabled', true);
@@ -1283,6 +1289,7 @@ $('#connect-button').on('click', async () => {
 
   conn = newConn;
   conn.events$.subscribe(handleCubeEvent);
+  fsSetCubeConnected(true);
   if (conn.capabilities.hardware) {
     await conn.sendCommand({ type: "REQUEST_HARDWARE" });
   }
@@ -1496,6 +1503,7 @@ twistyTracker.experimentalModel.currentPattern.addFreshListener(async (kpattern)
     resetAlg();
     updateAlgDisplay();
   }
+  fsOnPattern(kpattern);
 });
 
 function setTimerValue(timestamp: number) {
@@ -2573,6 +2581,13 @@ $("#cube").on('touchend', () => {
     activateTimer();
   }
 });
+
+initFullSolve();
+// Seed the Full Solve module's pattern state eagerly so it doesn't have to
+// wait for the next pattern-change event (addFreshListener fires on changes,
+// not on subscribe). Without this, newScramble's start state can default to
+// solved even when the cube is mid-state, which throws off phase detection.
+twistyTracker.experimentalModel.currentPattern.get().then(p => fsOnPattern(p)).catch(() => { /* ignore */ });
 
 // event listener for the dumbcube toggle
 $('#dumbcube-toggle').on('click', () => {
