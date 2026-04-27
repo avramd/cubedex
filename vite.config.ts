@@ -3,8 +3,12 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 const workerImportMetaUrlRE = /\bnew\s+(?:Worker|SharedWorker)\s*\(\s*(new\s+URL\s*\(\s*('[^']+'|"[^"]+"|`[^`]+`)\s*,\s*import\.meta\.url\s*\))/g;
 
+// Normalise BASE_PATH to /<...>/ — exactly one leading and one trailing
+// slash regardless of input (so /cubedex, cubedex/, //cubedex/// all become
+// /cubedex/). A bare/empty path collapses to "/". Mirrors scripts/deploy.sh.
 const rawBase = process.env.BASE_PATH ?? '/';
-const base = (rawBase.startsWith('/') ? rawBase : '/' + rawBase).replace(/\/?$/, '/');
+const stripped = rawBase.replace(/^\/+/, '').replace(/\/+$/, '');
+const base = stripped.length === 0 ? '/' : '/' + stripped + '/';
 
 export default defineConfig({
   base,
