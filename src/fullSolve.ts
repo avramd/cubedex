@@ -274,13 +274,17 @@ function isHeadlightsDone(facelets: string): boolean {
 
 // ---------- Phase sequences ----------
 
+// Index 0 (cross) and index 4 (CPLL) are swapped from a natural rainbow
+// so the two 2-look pairs sit adjacent on the colour wheel:
+//   2-look OLL:  yellow (EOLL) → orange (OCLL)
+//   2-look PLL:  blue (CPLL)   → purple (EPLL)
 const PHASE_COLORS = [
-  'rgba(59, 130, 246, 0.6)',   // blue — cross / pre-yellow-cross
+  'rgba(236, 72, 153, 0.6)',   // pink — cross
   'rgba(16, 185, 129, 0.6)',   // green — F2L
   'rgba(234, 179, 8, 0.6)',    // yellow — yellow-cross (2-look OLL) / OLL
   'rgba(249, 115, 22, 0.6)',   // orange — full OLL (2-look OLL) / headlights (2-look PLL)
-  'rgba(236, 72, 153, 0.6)',   // pink — headlights / solve-finish
-  'rgba(139, 92, 246, 0.6)',   // purple — solve-finish extra
+  'rgba(59, 130, 246, 0.6)',   // blue — CPLL (2-look PLL)
+  'rgba(139, 92, 246, 0.6)',   // purple — EPLL / PLL
 ];
 
 function currentPhaseSequence(): PhaseDef[] {
@@ -1142,10 +1146,13 @@ function renderGraph() {
         text: string;
         color: string;
         isTrendline: boolean;
+        noChit: boolean;
         point: { x: number; y: number };
         textW: number;
       };
       const entries: Entry[] = [];
+      let topY = Infinity;
+      let topX = 0;
       chart.data.datasets.forEach((ds: any, dsIdx: number) => {
         const meta = chart.getDatasetMeta(dsIdx);
         const point = meta.data[idx];
@@ -1164,6 +1171,9 @@ function renderGraph() {
           const ms = r.phases[k] ?? 0;
           if (ms <= 0) return; // skip 0-duration phases
           valueSec = ms / 1000;
+          // Track the topmost (smallest y) phase point — that's where the
+          // total cumulative line ends, and where the "Total" label belongs.
+          if (point.y < topY) { topY = point.y; topX = point.x; }
         }
         const text = `${label} ${formatSec(valueSec)}`;
         const textW = c2d.measureText(text).width;
@@ -1171,55 +1181,126 @@ function renderGraph() {
           text,
           color: String(ds.borderColor ?? '#000'),
           isTrendline,
+          // Trendlines drop the chit and instead colour the value text in
+          // the line's colour — keeps them the same width as phase labels
+          // while still distinguishing Ao5 vs Ao12 visually.
+          noChit: isTrendline,
           point: { x: point.x, y: point.y },
           textW,
         });
       });
+
+      // Synthetic "Solve" entry — no color chit, anchored just above the
+      // topmost cumulative point (the total of all phases for this solve).
+      const r = slice[idx];
+      if (r && Number.isFinite(topY)) {
+        const text = `Solve ${formatSec(r.totalMs / 1000)}`;
+        entries.push({
+          text,
+          color: '',
+          isTrendline: false,
+          noChit: true,
+          // Place 1 px above the topmost phase so the de-overlap algorithm
+          // sorts Solve to the top of the stack.
+          point: { x: topX, y: topY - 1 },
+          textW: c2d.measureText(text).width,
+        });
+      }
+
       if (entries.length === 0) { c2d.restore(); return; }
 
       // De-overlap the y positions, centered to minimise max displacement.
       const adjustedY = placeLabelsAvoidOverlap(entries.map(e => e.point.y), minSpacing);
 
       const chartArea = chart.chartArea;
+      const chartMidX = (chartArea.left + chartArea.right) / 2;
+
+      // Subtle vertical guide on the hovered column so it's unambiguous
+      // which solve the inline labels belong to (especially helpful for
+      // the second-to-last column where labels otherwise sit between
+      // this solve's points and the next solve's points).
+      const hoverX = entries[0]?.point.x;
+      if (typeof hoverX === 'number') {
+        c2d.save();
+        c2d.strokeStyle = isDarkNow ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.22)';
+        c2d.lineWidth = 1;
+        c2d.setLineDash([3, 3]);
+        c2d.beginPath();
+        c2d.moveTo(hoverX, chartArea.top);
+        c2d.lineTo(hoverX, chartArea.bottom);
+        c2d.stroke();
+        c2d.setLineDash([]);
+        c2d.restore();
+      }
+
       entries.forEach((e, i) => {
-        const totalW = chitSize + chitGap + e.textW;
+        const totalW = e.noChit ? e.textW : chitSize + chitGap + e.textW;
         const labelY = adjustedY[i];
-        // Default: place the label box to the right of the point, with the
-        // chit hugging the inside (point-facing) edge of the box.
-        let labelX = e.point.x + 8;
-        let chitOnLeft = true;
-        if (labelX + totalW + padX > chartArea.right - 2) {
-          // Near the right edge — flip whole label box to the inside-graph
-          // side (point-facing edge becomes the label's right side).
+        // Default to the side of the data point that has more chart space:
+        // labels go right when the point is in the LEFT half of the chart,
+        // and left when in the right half. This keeps labels for the
+        // second-to-last solve from spilling toward the last solve's
+        // column. Each direction has a fallback to the other side if it
+        // would overflow the chart area.
+        const preferRight = e.point.x < chartMidX;
+        let labelX: number;
+        let chitOnLeft: boolean;
+        if (preferRight) {
+          labelX = e.point.x + 8;
+          chitOnLeft = true;
+          if (labelX + totalW + padX > chartArea.right - 2) {
+            labelX = e.point.x - 8 - totalW;
+            chitOnLeft = false;
+          }
+        } else {
           labelX = e.point.x - 8 - totalW;
           chitOnLeft = false;
+          if (labelX - padX < chartArea.left + 2) {
+            labelX = e.point.x + 8;
+            chitOnLeft = true;
+          }
         }
 
         // Pill background.
         c2d.fillStyle = pillBg;
         c2d.fillRect(labelX - padX, labelY - pillH / 2, totalW + padX * 2, pillH);
 
-        const chitX = chitOnLeft ? labelX : labelX + e.textW + chitGap;
-        const textX = chitOnLeft ? labelX + chitSize + chitGap : labelX;
-
-        // Color chit (matches the legend representation).
-        if (e.isTrendline) {
-          c2d.strokeStyle = e.color;
-          c2d.lineWidth = 2;
-          c2d.setLineDash([4, 2]);
-          c2d.beginPath();
-          c2d.moveTo(chitX, labelY);
-          c2d.lineTo(chitX + chitSize, labelY);
-          c2d.stroke();
-          c2d.setLineDash([]);
-        } else {
-          c2d.fillStyle = e.color;
-          c2d.fillRect(chitX, labelY - chitSize / 2, chitSize, chitSize);
+        let textX = labelX;
+        if (!e.noChit) {
+          const chitX = chitOnLeft ? labelX : labelX + e.textW + chitGap;
+          textX = chitOnLeft ? labelX + chitSize + chitGap : labelX;
+          // Color chit (matches the legend representation).
+          if (e.isTrendline) {
+            c2d.strokeStyle = e.color;
+            c2d.lineWidth = 2;
+            c2d.setLineDash([4, 2]);
+            c2d.beginPath();
+            c2d.moveTo(chitX, labelY);
+            c2d.lineTo(chitX + chitSize, labelY);
+            c2d.stroke();
+            c2d.setLineDash([]);
+          } else {
+            c2d.fillStyle = e.color;
+            c2d.fillRect(chitX, labelY - chitSize / 2, chitSize, chitSize);
+          }
         }
 
-        // Text in the legend's body color (theme-aware).
-        c2d.fillStyle = labelTextColor;
-        c2d.fillText(e.text, textX, labelY);
+        // Text. Default in the legend's body color (theme-aware). For
+        // trendlines (no chit), colour just the numeric value with the
+        // line's colour so it doubles as the line indicator.
+        if (e.isTrendline) {
+          const sp = e.text.lastIndexOf(' ');
+          const labelPart = sp >= 0 ? e.text.slice(0, sp + 1) : '';
+          const valuePart = sp >= 0 ? e.text.slice(sp + 1) : e.text;
+          c2d.fillStyle = labelTextColor;
+          c2d.fillText(labelPart, textX, labelY);
+          const labelW = c2d.measureText(labelPart).width;
+          c2d.fillStyle = e.color;
+          c2d.fillText(valuePart, textX + labelW, labelY);
+        } else {
+          c2d.fillStyle = labelTextColor;
+          c2d.fillText(e.text, textX, labelY);
+        }
       });
       c2d.restore();
     },
