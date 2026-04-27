@@ -379,7 +379,10 @@
       <div id="load-container" class="flex-col gap-4 mt-4 p-4 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md transition-colors duration-300 ease-in-out dark:bg-gray-700 dark:text-white dark:border-gray-700 text-sm sm:text-base">
         <div id="default-alg-id" class="hidden bg-red-400"><!-- wildcard to add classes used in js --></div>
 
-        <div class="flex justify-end mb-2">
+        <div class="flex items-center justify-end mb-2">
+          <div id="fs-no-cube" class="hidden mr-3 px-2 py-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300 border border-dashed border-gray-400 dark:border-gray-500 rounded">
+            No smartcube connected — turns won't be tracked, but you can still browse, copy, set, or delete scrambles.
+          </div>
           <label for="full-solve-toggle" class="relative inline-flex items-center cursor-pointer">
             <input type="checkbox" id="full-solve-toggle" class="sr-only" />
             <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
@@ -480,11 +483,7 @@
         </div><!-- /#training-mode-content -->
 
         <div id="full-solve-content" class="hidden flex-col gap-4">
-          <div id="fs-no-cube" class="hidden p-6 text-center text-gray-700 dark:text-gray-300 border border-dashed border-gray-400 dark:border-gray-500 rounded-lg">
-            Connect a smartcube to use Full Solve mode.
-          </div>
-
-          <div id="fs-main" class="flex-col gap-4">
+          <div id="fs-main" class="flex flex-col gap-4">
             <div class="flex flex-wrap gap-4 items-end">
               <div>
                 <label for="fs-process-select" class="text-sm sm:text-base text-gray-900 block mb-1 dark:text-white">Process:</label>

@@ -326,7 +326,6 @@ const fullSolveToggleEl = () => $$<HTMLInputElement>('full-solve-toggle');
 const trainingContentEl = () => $$('training-mode-content');
 const fullSolveContentEl = () => $$('full-solve-content');
 const fsNoCubeEl = () => $$('fs-no-cube');
-const fsMainEl = () => $$('fs-main');
 const fsProcessEl = () => $$<HTMLSelectElement>('fs-process-select');
 const fsInspectionEl = () => $$<HTMLSelectElement>('fs-inspection-select');
 const fsTwoLookOllEl = () => $$<HTMLInputElement>('fs-twolook-oll-toggle');
@@ -342,12 +341,15 @@ const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
 const fsSolveListHintEl = () => $$('fs-solve-list-hint');
-// Full Solve reuses the existing #timeGraph canvas (shared with training mode).
-const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('timeGraph');
+// Full Solve renders into the same large graphing area training mode uses.
+const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('statsGraph');
+const algStatsEl = () => $$('alg-stats');
+const algNameDisplay2El = () => $$('alg-name-display2');
+const statsLegendEl = () => $$('stats-legend');
+const averageTimeBoxEl = () => $$('average-time-box');
+const averageTpsBoxEl = () => $$('average-tps-box');
+const singlePbBoxEl = () => $$('single-pb-box');
 const leftSideInnerEl = () => $$('left-side-inner');
-const algNameDisplayContainerEl = () => $$('alg-name-display-container');
-const timesDisplayEl = () => $$('times-display');
-const graphDisplayEl = () => $$('graph-display');
 const fsGraphRangeEl = () => $$<HTMLInputElement>('fs-graph-range');
 const fsGraphRangeValueEl = () => $$('fs-graph-range-value');
 const fsGraphYClipEl = () => $$<HTMLSelectElement>('fs-graph-yclip');
@@ -436,27 +438,110 @@ function applyFullSolveMode() {
   fullSolveContentEl()?.classList.toggle('flex', enabled);
   const toggle = fullSolveToggleEl();
   if (toggle) toggle.checked = enabled;
+  // Banner state depends on enabled+connected and must update either way.
+  updateCubeGate();
   if (enabled) {
-    updateCubeGate();
     updateCfopOptionsVisibility();
-    // Show the existing graph area (reusing #timeGraph). Hide the training
-    // sub-widgets (alg-name / times-display) while we're in Full Solve.
-    leftSideInnerEl()?.classList.remove('hidden');
-    algNameDisplayContainerEl()?.classList.add('hidden');
-    timesDisplayEl()?.classList.add('hidden');
-    graphDisplayEl()?.classList.remove('hidden');
-  } else {
-    // Leaving Full Solve — hide the graph area. Training mode's own
-    // visibility logic re-unhides #left-side-inner and its sub-widgets
-    // when an algorithm is loaded.
+    // Reuse training mode's #alg-stats area: big graph + 3 stat boxes.
+    algStatsEl()?.style.removeProperty('display');
     leftSideInnerEl()?.classList.add('hidden');
+    renderStatsBoxes();
+    renderStatsLegend();
+    // The canvas may have been display:none until just now — redraw to size
+    // properly against the visible container.
+    requestAnimationFrame(() => renderGraph());
+  } else {
+    // Leaving Full Solve — hide the stats area. Training mode re-shows it
+    // when an algorithm is loaded. Destroy our chart so the shared
+    // #statsGraph canvas is free for training mode's createStatsGraph().
+    if (graphChart) { graphChart.destroy(); graphChart = null; }
+    if (algStatsEl()) (algStatsEl() as HTMLElement).style.display = 'none';
+    // Restore the original Single/Ao5/Ao12 legend that training mode draws.
+    restoreTrainingLegend();
+    const algNameEl = algNameDisplay2El();
+    if (algNameEl) algNameEl.textContent = '';
+  }
+}
+
+const TRAINING_STATS_LEGEND_HTML = `
+  <span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:rgba(54,162,235,1);flex-shrink:0"></span>Single</span>
+  <span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:rgba(255,159,64,1);flex-shrink:0"></span>Ao5</span>
+  <span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:rgba(75,192,192,1);flex-shrink:0"></span>Ao12</span>
+`.trim();
+
+function renderStatsLegend() {
+  // Build a per-phase legend that matches the stacked-area dataset colors
+  // currently in `phaseSeq`. Trendlines (Ao5/Ao12) get appended.
+  const el = statsLegendEl();
+  if (!el) return;
+  const items: string[] = [];
+  phaseSeq.forEach((p, idx) => {
+    const color = PHASE_COLORS[idx % PHASE_COLORS.length].replace('0.6', '1');
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${p.label}</span>`);
+  });
+  if (prefs.graphAo5) {
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed rgba(0,0,0,0.75);flex-shrink:0"></span>Ao5</span>`);
+  }
+  if (prefs.graphAo12) {
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:0;border-top:2px dashed rgba(0,0,0,0.45);flex-shrink:0"></span>Ao12</span>`);
+  }
+  el.innerHTML = items.join('');
+}
+
+function restoreTrainingLegend() {
+  const el = statsLegendEl();
+  if (el) el.innerHTML = TRAINING_STATS_LEGEND_HTML;
+}
+
+function renderStatsBoxes() {
+  const totals = history.map(r => r.totalMs);
+  if (totals.length === 0) {
+    averageTimeBoxEl()?.replaceChildren();
+    if (averageTimeBoxEl()) averageTimeBoxEl()!.innerHTML = 'Average Time<br />--';
+    if (averageTpsBoxEl()) averageTpsBoxEl()!.innerHTML = 'Average TPS<br />--';
+    if (singlePbBoxEl()) singlePbBoxEl()!.innerHTML = 'Single PB<br />--';
+    return;
+  }
+  // Mean over the last 12 (or fewer if not enough history).
+  const recent = totals.slice(-12);
+  const meanMs = recent.reduce((a, b) => a + b, 0) / recent.length;
+  if (averageTimeBoxEl()) averageTimeBoxEl()!.innerHTML = `Average Time<br />${formatTime(meanMs)}`;
+
+  // TPS: total moves / total time (in seconds), averaged over last 12.
+  const recentRecords = history.slice(-12);
+  let totalMoves = 0;
+  let totalSec = 0;
+  recentRecords.forEach(r => {
+    const moveCount = r.solution ? r.solution.trim().split(/\s+/).filter(Boolean).length : 0;
+    totalMoves += moveCount;
+    totalSec += r.totalMs / 1000;
+  });
+  const tps = totalSec > 0 ? (totalMoves / totalSec).toFixed(2) : '--';
+  if (averageTpsBoxEl()) averageTpsBoxEl()!.innerHTML = `Average TPS<br />${tps}`;
+
+  const pb = Math.min(...totals);
+  if (singlePbBoxEl()) singlePbBoxEl()!.innerHTML = `Single PB<br />${formatTime(pb)}`;
+
+  // Header text — reflect current method choice.
+  const algNameEl = algNameDisplay2El();
+  if (algNameEl) {
+    const optionTags: string[] = [];
+    if (prefs.process === 'cfop') {
+      optionTags.push('CFOP');
+      if (prefs.twoLookOll) optionTags.push('2-look OLL');
+      if (prefs.twoLookPll) optionTags.push('2-look PLL');
+    } else {
+      optionTags.push('Beginner');
+    }
+    algNameEl.textContent = optionTags.join(' · ');
   }
 }
 
 function updateCubeGate() {
-  fsNoCubeEl()?.classList.toggle('hidden', cubeConnected);
-  fsMainEl()?.classList.toggle('hidden', !cubeConnected);
-  fsMainEl()?.classList.toggle('flex', cubeConnected);
+  // The no-cube notice sits next to the Full Solve toggle. Only show it when
+  // Full Solve is enabled (the toggle is meaningful) AND no cube is connected.
+  const showNotice = prefs.enabled && !cubeConnected;
+  fsNoCubeEl()?.classList.toggle('hidden', !showNotice);
 }
 
 function updateCfopOptionsVisibility() {
@@ -574,7 +659,7 @@ function renderStatus(text: string) {
 
 function renderSolutionMoves() {
   const el = fsSolutionMovesEl();
-  if (el) el.textContent = solveMoves.join(' ');
+  if (el) el.textContent = formatMoveGroups(solveMoves.join(' '));
 }
 
 function renderRetraceHint() {
@@ -585,7 +670,7 @@ function renderRetraceHint() {
   if (mode !== 'paused') { el.textContent = ''; return; }
   const checkpointIdx = lastReachedPhaseMoveIndex();
   const recent = solveMoves.slice(checkpointIdx);
-  el.textContent = invertMoves(recent).join(' ');
+  el.textContent = formatMoveGroups(invertMoves(recent).join(' '));
 }
 
 function lastReachedPhaseMoveIndex(): number {
@@ -826,6 +911,8 @@ function finishSolve() {
   const gr = fsGraphRangeEl();
   if (gr) gr.max = String(Math.max(20, history.length));
   renderGraph();
+  renderStatsBoxes();
+  renderStatsLegend();
   renderSolveList();
 }
 
@@ -946,14 +1033,13 @@ function renderGraph() {
     options: {
       responsive: true,
       animation: false,
-      // Reuse the existing training #timeGraph canvas which is sized as a
-      // ~200px square; keep aspect ratio 1 to match.
-      maintainAspectRatio: true,
-      aspectRatio: 1,
-      plugins: { legend: { display: true, labels: { boxWidth: 10, font: { size: 10 } } } },
+      maintainAspectRatio: false,
+      // Suppress the chart-internal legend; we render our own legend in
+      // #stats-legend so the per-phase color key sits above the canvas.
+      plugins: { legend: { display: false } },
       scales: {
         y: yOpts,
-        x: { ticks: { autoSkip: true, maxRotation: 0, font: { size: 9 } } },
+        x: { ticks: { autoSkip: true, maxRotation: 0 } },
       },
     },
   });
@@ -981,6 +1067,17 @@ function meanAndSd(values: number[]): { mean: number; sd: number } {
 
 // ---------- Solve list ----------
 
+// Format a move sequence into groups of 4: spaces only between groups,
+// no spaces within a group. e.g.  "R U R' U' F2 R F'"  →  "RUR'U' F2RF'"
+function formatMoveGroups(seq: string): string {
+  const moves = seq.trim().split(/\s+/).filter(Boolean);
+  const groups: string[] = [];
+  for (let i = 0; i < moves.length; i += 4) {
+    groups.push(moves.slice(i, i + 4).join(''));
+  }
+  return groups.join(' ');
+}
+
 function renderSolveList() {
   const listEl = fsSolveListEl();
   if (!listEl) return;
@@ -1000,9 +1097,10 @@ function renderSolveList() {
   }
   rev.forEach((r, idx) => {
     const originalIndex = history.length - idx; // 1-based
+    const realIdx = history.length - 1 - idx;
     const row = document.createElement('div');
     row.className = 'px-2 py-1 flex items-center gap-2 text-xs sm:text-sm';
-    row.dataset.solveIdx = String(history.length - 1 - idx);
+    row.dataset.solveIdx = String(realIdx);
 
     const num = document.createElement('div');
     num.className = 'w-8 text-right text-gray-400 tabular-nums';
@@ -1017,11 +1115,16 @@ function renderSolveList() {
     const scramble = document.createElement('div');
     scramble.className = 'flex-1 font-mono text-gray-600 dark:text-gray-300 truncate';
     scramble.title = r.scramble;
-    scramble.textContent = r.scramble;
+    scramble.textContent = formatMoveGroups(r.scramble);
     row.appendChild(scramble);
 
+    // Action icons: pack tightly with no inter-button gap; rely on px padding inside each.
+    const actions = document.createElement('div');
+    actions.className = 'flex items-center gap-0';
+    const iconBtnClass = 'leading-none px-1 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed';
+
     const copyBtn = document.createElement('button');
-    copyBtn.className = 'hover:bg-gray-200 dark:hover:bg-gray-600 rounded px-1';
+    copyBtn.className = iconBtnClass;
     copyBtn.textContent = '📋';
     copyBtn.title = 'Copy scramble';
     copyBtn.addEventListener('click', (e) => {
@@ -1031,10 +1134,10 @@ function renderSolveList() {
         setTimeout(() => { copyBtn.textContent = '📋'; }, 900);
       });
     });
-    row.appendChild(copyBtn);
+    actions.appendChild(copyBtn);
 
     const targetBtn = document.createElement('button');
-    targetBtn.className = 'hover:bg-gray-200 dark:hover:bg-gray-600 rounded px-1 disabled:opacity-40 disabled:cursor-not-allowed';
+    targetBtn.className = iconBtnClass;
     targetBtn.textContent = '🎯';
     targetBtn.title = cubeIsSolved ? 'Use this scramble next' : 'Solve cube first to reuse a scramble';
     targetBtn.disabled = !cubeIsSolved;
@@ -1043,14 +1146,52 @@ function renderSolveList() {
       pendingScramble = r.scramble;
       void newScramble();
     });
-    row.appendChild(targetBtn);
+    actions.appendChild(targetBtn);
 
+    const trashBtn = document.createElement('button');
+    trashBtn.className = iconBtnClass;
+    trashBtn.textContent = '🗑️';
+    trashBtn.title = 'Delete this solve';
+    trashBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Inline confirm: replace the icon row with a "Delete?" prompt for THIS row.
+      actions.innerHTML = '';
+      const prompt = document.createElement('span');
+      prompt.className = 'text-xs text-red-600 mr-1';
+      prompt.textContent = 'Delete?';
+      const yes = document.createElement('button');
+      yes.className = 'text-xs font-bold text-red-600 hover:text-red-800 px-1';
+      yes.textContent = 'Yes';
+      yes.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        history.splice(realIdx, 1);
+        saveHistory();
+        const gr = fsGraphRangeEl();
+        if (gr) gr.max = String(Math.max(20, history.length));
+        renderGraph();
+        renderStatsBoxes();
+        renderSolveList();
+      });
+      const no = document.createElement('button');
+      no.className = 'text-xs text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white px-1';
+      no.textContent = 'No';
+      no.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        renderSolveList();
+      });
+      actions.appendChild(prompt);
+      actions.appendChild(yes);
+      actions.appendChild(no);
+    });
+    actions.appendChild(trashBtn);
+
+    row.appendChild(actions);
     listEl.appendChild(row);
 
     if (cubeIsSolved && r.solution) {
       const sol = document.createElement('div');
       sol.className = 'pl-10 pr-2 pb-2 font-mono text-[11px] text-gray-500 dark:text-gray-400 break-words';
-      sol.textContent = r.solution;
+      sol.textContent = formatMoveGroups(r.solution);
       listEl.appendChild(sol);
     }
   });
@@ -1073,6 +1214,9 @@ function wireEvents() {
     savePrefs();
     updateCfopOptionsVisibility();
     resetSolveState();
+    renderStatsLegend();
+    renderStatsBoxes();
+    renderGraph();
   });
 
   fsInspectionEl()?.addEventListener('change', () => {
@@ -1084,12 +1228,18 @@ function wireEvents() {
     prefs.twoLookOll = !!fsTwoLookOllEl()?.checked;
     savePrefs();
     resetSolveState();
+    renderStatsLegend();
+    renderStatsBoxes();
+    renderGraph();
   });
 
   fsTwoLookPllEl()?.addEventListener('change', () => {
     prefs.twoLookPll = !!fsTwoLookPllEl()?.checked;
     savePrefs();
     resetSolveState();
+    renderStatsLegend();
+    renderStatsBoxes();
+    renderGraph();
   });
 
   fsNewScrambleBtnEl()?.addEventListener('click', () => {
@@ -1124,12 +1274,14 @@ function wireEvents() {
     prefs.graphAo5 = !!fsGraphAo5El()?.checked;
     savePrefs();
     renderGraph();
+    renderStatsLegend();
   });
 
   fsGraphAo12El()?.addEventListener('change', () => {
     prefs.graphAo12 = !!fsGraphAo12El()?.checked;
     savePrefs();
     renderGraph();
+    renderStatsLegend();
   });
 }
 
@@ -1225,7 +1377,7 @@ export function fsOnPattern(pattern: KPattern) {
 
 export function fsSetCubeConnected(connected: boolean) {
   cubeConnected = connected;
-  if (prefs.enabled) updateCubeGate();
+  updateCubeGate();
   if (connected && prefs.enabled && mode === 'idle') {
     // Cube just connected — kick off a scramble to solve.
     void newScramble();
