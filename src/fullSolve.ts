@@ -108,6 +108,69 @@ function saveHistory() {
 
 let history: SolveRecord[] = loadHistory();
 
+function exportHistoryAsJson() {
+  const blob = new Blob([JSON.stringify(history, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `cubedex-solve-history-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Merge `incoming` into `history`, deduping by `ts`. On collision, keep the
+// shorter `totalMs` (treats the same physical solve recorded twice as the
+// canonical one — slower duplicates are usually re-derivations or imports
+// from a less-trimmed copy). Returns counts for an after-the-fact summary.
+function mergeImportedHistory(incoming: any[]): { added: number; replaced: number; skipped: number } {
+  const byTs = new Map<number, SolveRecord>();
+  for (const r of history) byTs.set(r.ts, r);
+  let added = 0, replaced = 0, skipped = 0;
+  for (const r of incoming) {
+    if (!r || typeof r.ts !== 'number' || typeof r.totalMs !== 'number' ||
+        typeof r.scramble !== 'string' || typeof r.solution !== 'string' ||
+        !r.phases || typeof r.process !== 'string') {
+      skipped++;
+      continue;
+    }
+    const existing = byTs.get(r.ts);
+    if (!existing) {
+      byTs.set(r.ts, r as SolveRecord);
+      added++;
+    } else if (r.totalMs < existing.totalMs) {
+      byTs.set(r.ts, r as SolveRecord);
+      replaced++;
+    }
+  }
+  history = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
+  while (history.length > HISTORY_CAP) history.shift();
+  saveHistory();
+  return { added, replaced, skipped };
+}
+
+function importHistoryFromText(text: string) {
+  let parsed: any;
+  try { parsed = JSON.parse(text); } catch { alert('Import failed: invalid JSON.'); return; }
+  if (!Array.isArray(parsed)) { alert('Import failed: expected a JSON array of solves.'); return; }
+  const before = history.length;
+  const { added, replaced, skipped } = mergeImportedHistory(parsed);
+  // Slider max depends on history length; keep prefs in range.
+  const gr = fsGraphRangeEl();
+  if (gr) gr.max = String(Math.max(20, history.length));
+  renderGraph();
+  renderStatsBoxes();
+  renderStatsLegend();
+  renderSolveList();
+  const parts = [`Imported ${added} new solve${added === 1 ? '' : 's'}`];
+  if (replaced) parts.push(`replaced ${replaced} with shorter time${replaced === 1 ? '' : 's'}`);
+  if (skipped) parts.push(`skipped ${skipped} invalid record${skipped === 1 ? '' : 's'}`);
+  parts.push(`history size: ${before} → ${history.length}`);
+  alert(parts.join('. ') + '.');
+}
+
 // ---------- Facelet helpers & phase predicates ----------
 // Facelet string order (Kociemba): URFDLB, 9 stickers per face, each face in reading order.
 //   0 1 2
@@ -344,6 +407,9 @@ const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
 const fsSolveListHintEl = () => $$('fs-solve-list-hint');
+const fsExportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-export-history');
+const fsImportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-import-history');
+const fsImportHistoryInputEl = () => $$<HTMLInputElement>('fs-import-history-input');
 // Full Solve renders into the same large graphing area training mode uses.
 const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('statsGraph');
 const algStatsEl = () => $$('alg-stats');
@@ -1909,6 +1975,27 @@ function wireEvents() {
     savePrefs();
     renderGraph();
     renderStatsLegend();
+  });
+
+  fsExportHistoryBtnEl()?.addEventListener('click', () => {
+    exportHistoryAsJson();
+  });
+
+  fsImportHistoryBtnEl()?.addEventListener('click', () => {
+    fsImportHistoryInputEl()?.click();
+  });
+
+  fsImportHistoryInputEl()?.addEventListener('change', async (ev) => {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      importHistoryFromText(text);
+    } finally {
+      // Allow re-importing the same file by clearing the value.
+      input.value = '';
+    }
   });
 }
 

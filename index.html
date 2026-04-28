@@ -545,7 +545,12 @@
 
             <div id="fs-solve-list-container" class="mt-4">
               <div class="flex items-center justify-between mb-1">
-                <h3 class="text-sm font-semibold">Past Solves</h3>
+                <div class="flex items-center gap-2">
+                  <h3 class="text-sm font-semibold">Past Solves</h3>
+                  <button id="fs-export-history" type="button" class="text-xs px-2 py-0.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700" title="Download solve history as JSON">Export</button>
+                  <button id="fs-import-history" type="button" class="text-xs px-2 py-0.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700" title="Merge solve history from a JSON file">Import</button>
+                  <input id="fs-import-history-input" type="file" accept="application/json,.json" class="hidden" />
+                </div>
                 <span id="fs-solve-list-hint" class="text-xs text-gray-500 dark:text-gray-400"></span>
               </div>
               <div id="fs-solve-list" class="max-h-[320px] overflow-y-scroll border border-gray-200 dark:border-gray-600 rounded-lg divide-y divide-gray-100 dark:divide-gray-700"></div>
