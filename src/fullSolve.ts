@@ -1387,6 +1387,22 @@ function renderGraph() {
       },
     },
   });
+
+  // Belt-and-braces: Chart.js's `mouseout` interaction event doesn't always
+  // fire when the cursor leaves the canvas without crossing another column,
+  // so the inline labels and guide line can stick around. An explicit
+  // mouseleave/blur on the canvas clears the hover index and triggers a
+  // redraw. Reassigning via the on… property (not addEventListener) means
+  // re-renders don't pile up duplicate listeners.
+  const clearHover = () => {
+    if (graphChart && (graphChart as any).$activeIndex !== -1) {
+      (graphChart as any).$activeIndex = -1;
+      graphChart.draw();
+    }
+  };
+  canvas.onmouseleave = clearHover;
+  canvas.onpointerleave = clearHover;
+  canvas.onpointercancel = clearHover;
 }
 
 function rollingAverage(values: number[], n: number): (number | null)[] {
