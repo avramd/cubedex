@@ -363,12 +363,15 @@ function currentPhaseSequence(): PhaseDef[] {
     seq.push({ key: 'eoll', label: 'EOLL', predicate: isYellowCrossDone, color: PHASE_COLORS[2] });
     seq.push({ key: 'ocll', label: 'OCLL', predicate: isOllDone, color: PHASE_COLORS[3] });
   } else {
-    seq.push({ key: 'oll', label: 'OLL', predicate: isOllDone, color: PHASE_COLORS[2] });
+    // Aggregate OLL takes the higher-stacked subphase's color (OCLL = orange)
+    // so it visually matches the top of the EOLL+OCLL stack from 2-look mode.
+    seq.push({ key: 'oll', label: 'OLL', predicate: isOllDone, color: PHASE_COLORS[3] });
   }
   if (prefs.twoLookPll) {
     seq.push({ key: 'cpll', label: 'CPLL', predicate: (f) => isOllDone(f) && isHeadlightsDone(f), color: PHASE_COLORS[4] });
     seq.push({ key: 'epll', label: 'EPLL', predicate: isSolved, color: PHASE_COLORS[5] });
   } else {
+    // Aggregate PLL takes EPLL's color (purple) — same rationale as OLL above.
     seq.push({ key: 'pll', label: 'PLL', predicate: isSolved, color: PHASE_COLORS[5] });
   }
   return seq;
@@ -380,6 +383,29 @@ const PHASE_KEY_LABELS: Record<string, string> = {
   eoll: 'EOLL', ocll: 'OCLL', cpll: 'CPLL', epll: 'EPLL',
   setup: 'Setup', ll: 'LL',
 };
+
+// Look up a phase's milliseconds from a stored record, given the *display*
+// key currently being rendered. Toggling 2-look OLL/PLL only changes how
+// the stack is split visually — the underlying data is preserved:
+//   - When showing the aggregate ('oll'/'pll'), sum any matching split
+//     subphases from the record (so a 2-look-on solve still contributes).
+//   - When showing a split subphase ('eoll'/'ocll'/'cpll'/'epll') against
+//     a record that only has the aggregate, fold the aggregate into the
+//     dominant ("higher stacked") subphase — OCLL absorbs `oll`, EPLL
+//     absorbs `pll` — and the other subphase stays at 0. Total per-solve
+//     time is preserved either way.
+function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
+  const p = r.phases || {};
+  switch (displayKey) {
+    case 'oll':  return (p.oll  ?? 0) + (p.eoll ?? 0) + (p.ocll ?? 0);
+    case 'pll':  return (p.pll  ?? 0) + (p.cpll ?? 0) + (p.epll ?? 0);
+    case 'ocll': return (p.ocll ?? p.oll ?? 0);
+    case 'eoll': return (p.eoll ?? 0);
+    case 'epll': return (p.epll ?? p.pll ?? 0);
+    case 'cpll': return (p.cpll ?? 0);
+    default:     return p[displayKey] ?? 0;
+  }
+}
 
 // ---------- DOM refs ----------
 
@@ -571,8 +597,8 @@ function renderStatsLegend() {
   const el = statsLegendEl();
   if (!el) return;
   const items: string[] = [];
-  phaseSeq.forEach((p, idx) => {
-    const color = PHASE_COLORS[idx % PHASE_COLORS.length].replace('0.6', '1');
+  phaseSeq.forEach((p) => {
+    const color = p.color.replace('0.6', '1');
     items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${p.label}</span>`);
   });
   const isDark = document.documentElement.classList.contains('dark');
@@ -1092,28 +1118,33 @@ function renderGraph() {
   slice.forEach((r, solveIdx) => {
     let acc = 0;
     for (const k of keyOrder) {
-      acc += (r.phases[k] ?? 0) / 1000;
+      acc += phaseMsForDisplay(r, k) / 1000;
       cumulative[solveIdx].push(acc);
     }
   });
 
-  const datasets: any[] = keyOrder.map((k, kIdx) => ({
-    type: 'line' as const,
-    label: PHASE_KEY_LABELS[k] ?? k,
-    data: cumulative.map(row => row[kIdx]),
-    backgroundColor: PHASE_COLORS[kIdx % PHASE_COLORS.length],
-    borderColor: PHASE_COLORS[kIdx % PHASE_COLORS.length].replace('0.6', '1'),
-    borderWidth: 1,
-    fill: kIdx === 0 ? 'origin' : '-1',
-    pointRadius: 2,
-    pointHoverRadius: 4,
-    pointBackgroundColor: PHASE_COLORS[kIdx % PHASE_COLORS.length].replace('0.6', '1'),
-    tension: 0.15,
-    order: 2,
-    // Allow point circles at data[0] and data[n-1] to render fully even
-    // though their centers sit at the chart-area edges.
-    clip: false,
-  }));
+  const datasets: any[] = keyOrder.map((k, kIdx) => {
+    const phaseDef = phaseSeq[kIdx];
+    const fill = phaseDef?.color ?? PHASE_COLORS[kIdx % PHASE_COLORS.length];
+    const stroke = fill.replace('0.6', '1');
+    return {
+      type: 'line' as const,
+      label: PHASE_KEY_LABELS[k] ?? k,
+      data: cumulative.map(row => row[kIdx]),
+      backgroundColor: fill,
+      borderColor: stroke,
+      borderWidth: 1,
+      fill: kIdx === 0 ? 'origin' : '-1',
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      pointBackgroundColor: stroke,
+      tension: 0.15,
+      order: 2,
+      // Allow point circles at data[0] and data[n-1] to render fully even
+      // though their centers sit at the chart-area edges.
+      clip: false,
+    };
+  });
 
   const totals = slice.map(r => r.totalMs / 1000);
   const isDark = document.documentElement.classList.contains('dark');
@@ -1293,7 +1324,7 @@ function renderGraph() {
           const r = slice[idx];
           const k = keyOrder[dsIdx];
           if (!r || !k) return;
-          const ms = r.phases[k] ?? 0;
+          const ms = phaseMsForDisplay(r, k);
           if (ms <= 0) return; // skip 0-duration phases
           valueSec = ms / 1000;
           // Track the topmost (smallest y) phase point — that's where the
