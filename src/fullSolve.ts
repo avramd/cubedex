@@ -1371,10 +1371,28 @@ function renderGraph() {
       // vertical stack on each side of the column guide.
       const phaseEntries = entries.filter(e => !e.noChit);
       const chitlessEntries = entries.filter(e => e.noChit);
-      const phaseY = placeLabelsAvoidOverlap(phaseEntries.map(e => e.point.y), minSpacing);
-      const chitlessY = placeLabelsAvoidOverlap(chitlessEntries.map(e => e.point.y), minSpacing);
 
       const chartArea = chart.chartArea;
+      // For labels whose data point sits ABOVE the plot area (the solve's
+      // cumulative phase total exceeds the y-axis clip), remap each
+      // clipped target to a fixed slot just inside the top of the chart,
+      // ranked by original stacking order (topmost phase first). Labels
+      // for unclipped phases keep their natural y so they stay visually
+      // anchored to their data points; the subsequent de-overlap pass
+      // resolves any collision between the clipped stack and a nearby
+      // unclipped label.
+      const clipMin = chartArea.top + pillH / 2;
+      const remapClipped = (es: Entry[]): number[] => {
+        const targets = es.map(e => e.point.y);
+        const clippedIdxs: number[] = [];
+        es.forEach((e, i) => { if (e.point.y < chartArea.top) clippedIdxs.push(i); });
+        clippedIdxs.sort((a, b) => es[a].point.y - es[b].point.y);
+        clippedIdxs.forEach((idx, rank) => { targets[idx] = clipMin + rank * minSpacing; });
+        return targets;
+      };
+      const phaseY = placeLabelsAvoidOverlap(remapClipped(phaseEntries), minSpacing);
+      const chitlessY = placeLabelsAvoidOverlap(remapClipped(chitlessEntries), minSpacing);
+
       const hoverX = (phaseEntries[0] ?? chitlessEntries[0])?.point.x;
 
       // Subtle vertical guide on the hovered column so the labels on each
