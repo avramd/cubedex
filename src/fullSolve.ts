@@ -1167,6 +1167,11 @@ function renderGraph() {
     afterDatasetsDraw(chart: any) {
       const idx = chart.$activeIndex;
       if (typeof idx !== 'number' || idx < 0) return;
+      // Two-stage hover: when the cursor is inside the canvas but outside
+      // the plot axes, show only aggregate (chit-less) labels and the
+      // guide line; suppress the chit-bearing per-phase labels. Default to
+      // true if the flag has never been written.
+      const inAxes: boolean = chart.$inAxes !== false;
       const c2d: CanvasRenderingContext2D = chart.ctx;
       c2d.save();
       c2d.font = '11px ui-sans-serif, system-ui, sans-serif';
@@ -1350,7 +1355,7 @@ function renderGraph() {
         }
       };
 
-      phaseEntries.forEach((e, i) => renderEntry(e, phaseY[i], phaseSide, 0));
+      if (inAxes) phaseEntries.forEach((e, i) => renderEntry(e, phaseY[i], phaseSide, 0));
       chitlessEntries.forEach((e, i) => renderEntry(e, chitlessY[i], chitlessSide, chitlessOffset));
 
       c2d.restore();
@@ -1368,10 +1373,41 @@ function renderGraph() {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       events: ['mousemove', 'mouseout', 'click', 'touchstart', 'touchmove'],
-      onHover: (_e, elements, chart) => {
-        const newIdx = elements && elements.length > 0 ? elements[0].index : -1;
-        if ((chart as any).$activeIndex !== newIdx) {
-          (chart as any).$activeIndex = newIdx;
+      onHover: (e, elements, chart) => {
+        // Two-stage hover: full chit + aggregate labels when the cursor is
+        // inside the plot axes; aggregate-only when the cursor is inside the
+        // canvas but outside the axes. Even outside the axes, horizontal
+        // cursor motion still updates the active column so the aggregate
+        // labels and guide line track the nearest x value.
+        const ca = chart.chartArea;
+        const ex = (e as any)?.x;
+        const ey = (e as any)?.y;
+        const hasXY = typeof ex === 'number' && typeof ey === 'number';
+        const inAxes = hasXY &&
+          ex >= ca.left && ex <= ca.right && ey >= ca.top && ey <= ca.bottom;
+        const ch = chart as any;
+        const hoveredIdx = elements && elements.length > 0 ? elements[0].index : -1;
+        let newIdx: number;
+        if (inAxes) {
+          newIdx = hoveredIdx;
+        } else if (hasXY) {
+          // Outside axes but still within the canvas: snap to the closest
+          // column by x. Chart.js's category x-scale maps pixel → index via
+          // getValueForPixel; clamp to valid range.
+          const xScale: any = chart.scales.x;
+          const labels: any[] = (chart.data.labels as any[]) ?? [];
+          const raw = xScale?.getValueForPixel?.(ex);
+          if (typeof raw === 'number' && labels.length > 0) {
+            newIdx = Math.max(0, Math.min(labels.length - 1, Math.round(raw)));
+          } else {
+            newIdx = ch.$activeIndex ?? -1;
+          }
+        } else {
+          newIdx = ch.$activeIndex ?? -1;
+        }
+        if (ch.$activeIndex !== newIdx || ch.$inAxes !== inAxes) {
+          ch.$activeIndex = newIdx;
+          ch.$inAxes = inAxes;
           chart.draw();
         }
       },
@@ -1389,20 +1425,48 @@ function renderGraph() {
   });
 
   // Belt-and-braces: Chart.js's `mouseout` interaction event doesn't always
-  // fire when the cursor leaves the canvas without crossing another column,
-  // so the inline labels and guide line can stick around. An explicit
-  // mouseleave/blur on the canvas clears the hover index and triggers a
-  // redraw. Reassigning via the on… property (not addEventListener) means
-  // re-renders don't pile up duplicate listeners.
+  // fire when the cursor leaves the canvas, so the inline labels and guide
+  // line can stick around. We attach mousemove and leave handlers on the
+  // outer #alg-stats wrapper so the guide + aggregate labels keep updating
+  // as the cursor moves anywhere within the stats area (chart + metric
+  // boxes), and only clear when the cursor leaves the wrapper entirely.
   const clearHover = () => {
-    if (graphChart && (graphChart as any).$activeIndex !== -1) {
-      (graphChart as any).$activeIndex = -1;
+    if (!graphChart) return;
+    const ch = graphChart as any;
+    if (ch.$activeIndex !== -1 || ch.$inAxes !== false) {
+      ch.$activeIndex = -1;
+      ch.$inAxes = false;
       graphChart.draw();
     }
   };
-  canvas.onmouseleave = clearHover;
-  canvas.onpointerleave = clearHover;
-  canvas.onpointercancel = clearHover;
+  const algStatsEl = document.getElementById('alg-stats');
+  if (algStatsEl) {
+    algStatsEl.onmousemove = (ev) => {
+      if (!graphChart) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = ev.clientX - rect.left;
+      const cy = ev.clientY - rect.top;
+      const ca = graphChart.chartArea;
+      const xScale: any = graphChart.scales.x;
+      const labels: any[] = (graphChart.data.labels as any[]) ?? [];
+      if (!labels.length) return;
+      const inAxes = cx >= ca.left && cx <= ca.right && cy >= ca.top && cy <= ca.bottom;
+      const raw = xScale?.getValueForPixel?.(cx);
+      const ch = graphChart as any;
+      let newIdx = ch.$activeIndex ?? -1;
+      if (typeof raw === 'number') {
+        newIdx = Math.max(0, Math.min(labels.length - 1, Math.round(raw)));
+      }
+      if (ch.$activeIndex !== newIdx || ch.$inAxes !== inAxes) {
+        ch.$activeIndex = newIdx;
+        ch.$inAxes = inAxes;
+        graphChart.draw();
+      }
+    };
+    algStatsEl.onmouseleave = clearHover;
+    algStatsEl.onpointerleave = clearHover;
+    algStatsEl.onpointercancel = clearHover;
+  }
 }
 
 function rollingAverage(values: number[], n: number): (number | null)[] {
