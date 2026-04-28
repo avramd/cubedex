@@ -379,11 +379,32 @@
       <div id="load-container" class="flex-col gap-4 mt-4 p-4 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md transition-colors duration-300 ease-in-out dark:bg-gray-700 dark:text-white dark:border-gray-700 text-sm sm:text-base">
         <div id="default-alg-id" class="hidden bg-red-400"><!-- wildcard to add classes used in js --></div>
 
-        <div class="flex items-center justify-end mb-2">
-          <div id="fs-no-cube" class="hidden mr-3 px-2 py-1 text-xs sm:text-sm text-gray-700 dark:text-gray-300 border border-dashed border-gray-400 dark:border-gray-500 rounded">
-            No smartcube connected — turns won't be tracked, but you can still browse, copy, set, or delete scrambles.
+        <div class="flex flex-wrap items-center gap-3 mb-2">
+          <div id="fs-graph-controls" class="hidden flex-wrap items-center gap-4 text-xs sm:text-sm">
+            <label class="flex items-center gap-2">
+              <span>View last</span>
+              <input id="fs-graph-range" type="range" min="20" max="500" value="20" class="cursor-pointer" />
+              <span id="fs-graph-range-value" class="tabular-nums">20</span>
+              <span>solves</span>
+            </label>
+            <label class="flex items-center gap-2">
+              <span>Y-axis:</span>
+              <select id="fs-graph-yclip" class="p-1 border border-gray-400 rounded bg-white dark:bg-gray-600 dark:text-white dark:border-gray-700">
+                <option value="1sd" selected>Clip at mean + 1σ</option>
+                <option value="2sd">Clip at mean + 2σ</option>
+                <option value="log">No clip (log Y)</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-1">
+              <input type="checkbox" id="fs-graph-ao5" checked class="form-checkbox h-4 w-4 text-blue-600" />
+              <span>Ao5</span>
+            </label>
+            <label class="flex items-center gap-1">
+              <input type="checkbox" id="fs-graph-ao12" checked class="form-checkbox h-4 w-4 text-blue-600" />
+              <span>Ao12</span>
+            </label>
           </div>
-          <label for="full-solve-toggle" class="relative inline-flex items-center cursor-pointer">
+          <label for="full-solve-toggle" class="ml-auto relative inline-flex items-center cursor-pointer">
             <input type="checkbox" id="full-solve-toggle" class="sr-only" />
             <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
             <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
@@ -554,31 +575,6 @@
                 <span id="fs-solve-list-hint" class="text-xs text-gray-500 dark:text-gray-400"></span>
               </div>
               <div id="fs-solve-list" class="max-h-[320px] overflow-y-scroll border border-gray-200 dark:border-gray-600 rounded-lg divide-y divide-gray-100 dark:divide-gray-700"></div>
-            </div>
-
-            <div id="fs-graph-controls" class="mt-4 flex flex-wrap items-center gap-4 text-xs sm:text-sm">
-              <label class="flex items-center gap-2">
-                <span>View last</span>
-                <input id="fs-graph-range" type="range" min="1" max="20" value="20" class="cursor-pointer" />
-                <span id="fs-graph-range-value" class="tabular-nums">20</span>
-                <span>solves</span>
-              </label>
-              <label class="flex items-center gap-2">
-                <span>Y-axis:</span>
-                <select id="fs-graph-yclip" class="p-1 border border-gray-400 rounded bg-white dark:bg-gray-600 dark:text-white dark:border-gray-700">
-                  <option value="1sd" selected>Clip at mean + 1σ</option>
-                  <option value="2sd">Clip at mean + 2σ</option>
-                  <option value="log">No clip (log Y)</option>
-                </select>
-              </label>
-              <label class="flex items-center gap-1">
-                <input type="checkbox" id="fs-graph-ao5" checked class="form-checkbox h-4 w-4 text-blue-600" />
-                <span>Ao5</span>
-              </label>
-              <label class="flex items-center gap-1">
-                <input type="checkbox" id="fs-graph-ao12" checked class="form-checkbox h-4 w-4 text-blue-600" />
-                <span>Ao12</span>
-              </label>
             </div>
           </div>
         </div>

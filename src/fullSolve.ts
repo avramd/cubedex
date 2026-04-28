@@ -157,9 +157,6 @@ function importHistoryFromText(text: string) {
   if (!Array.isArray(parsed)) { alert('Import failed: expected a JSON array of solves.'); return; }
   const before = history.length;
   const { added, replaced, skipped } = mergeImportedHistory(parsed);
-  // Slider max depends on history length; keep prefs in range.
-  const gr = fsGraphRangeEl();
-  if (gr) gr.max = String(Math.max(20, history.length));
   renderGraph();
   renderStatsBoxes();
   renderStatsLegend();
@@ -391,7 +388,7 @@ const $$ = <T extends HTMLElement>(id: string) => document.getElementById(id) as
 const fullSolveToggleEl = () => $$<HTMLInputElement>('full-solve-toggle');
 const trainingContentEl = () => $$('training-mode-content');
 const fullSolveContentEl = () => $$('full-solve-content');
-const fsNoCubeEl = () => $$('fs-no-cube');
+const fsGraphControlsEl = () => $$('fs-graph-controls');
 const fsProcessEl = () => $$<HTMLSelectElement>('fs-process-select');
 const fsInspectionEl = () => $$<HTMLSelectElement>('fs-inspection-select');
 const fsTwoLookOllEl = () => $$<HTMLInputElement>('fs-twolook-oll-toggle');
@@ -533,6 +530,8 @@ function applyFullSolveMode() {
   trainingContentEl()?.classList.toggle('hidden', enabled);
   fullSolveContentEl()?.classList.toggle('hidden', !enabled);
   fullSolveContentEl()?.classList.toggle('flex', enabled);
+  fsGraphControlsEl()?.classList.toggle('hidden', !enabled);
+  fsGraphControlsEl()?.classList.toggle('flex', enabled);
   const toggle = fullSolveToggleEl();
   if (toggle) toggle.checked = enabled;
   // Banner state depends on enabled+connected and must update either way.
@@ -637,11 +636,27 @@ function renderStatsBoxes() {
   }
 }
 
+// Classes that turn the status line into a dotted-border banner. Applied
+// when Full Solve is enabled but no smartcube is connected (the only state
+// in which we show "Connect a smart cube to track your solves." in place
+// of the normal status text).
+const NO_CUBE_BANNER_CLASSES = ['px-2', 'py-1', 'border', 'border-dashed', 'border-gray-400', 'dark:border-gray-500', 'rounded', 'inline-block'];
+
 function updateCubeGate() {
-  // The no-cube notice sits next to the Full Solve toggle. Only show it when
-  // Full Solve is enabled (the toggle is meaningful) AND no cube is connected.
-  const showNotice = prefs.enabled && !cubeConnected;
-  fsNoCubeEl()?.classList.toggle('hidden', !showNotice);
+  // When Full Solve is enabled and no cube is connected, the status line
+  // becomes a dotted "Connect a smart cube…" banner. When connected (or
+  // Full Solve is off), the banner styling is stripped and renderStatus
+  // is free to drive the line again.
+  const status = fsStatusEl();
+  const showBanner = prefs.enabled && !cubeConnected;
+  if (status) {
+    if (showBanner) {
+      status.textContent = 'Connect a smart cube to track your solves.';
+      status.classList.add(...NO_CUBE_BANNER_CLASSES);
+    } else {
+      status.classList.remove(...NO_CUBE_BANNER_CLASSES);
+    }
+  }
 }
 
 function updateCfopOptionsVisibility() {
@@ -766,6 +781,10 @@ function startTimerLoop() {
 }
 
 function renderStatus(text: string) {
+  // Suppress normal status text while updateCubeGate is showing the
+  // "Connect a smart cube…" banner — otherwise scramble/solve flows
+  // would overwrite the banner the moment they fire.
+  if (prefs.enabled && !cubeConnected) return;
   const el = fsStatusEl();
   if (el) el.textContent = text;
 }
@@ -1018,9 +1037,6 @@ function finishSolve() {
   };
   history.push(record);
   saveHistory();
-  // Refresh slider max now that we have one more solve.
-  const gr = fsGraphRangeEl();
-  if (gr) gr.max = String(Math.max(20, history.length));
   renderGraph();
   renderStatsBoxes();
   renderStatsLegend();
@@ -2005,9 +2021,16 @@ function applyPrefsToUI() {
   const i = fsInspectionEl(); if (i) i.value = prefs.inspection;
   const ol = fsTwoLookOllEl(); if (ol) ol.checked = prefs.twoLookOll;
   const pl = fsTwoLookPllEl(); if (pl) pl.checked = prefs.twoLookPll;
+  // Slider range is fixed: 20 (min) to 500 (HISTORY_CAP). When history is
+  // shorter than the chosen range, renderGraph() clamps to history.length.
+  if (prefs.graphRange < 20 || prefs.graphRange > 500) {
+    prefs.graphRange = Math.max(20, Math.min(500, prefs.graphRange));
+    savePrefs();
+  }
   const gr = fsGraphRangeEl(); if (gr) {
-    gr.max = String(Math.max(20, history.length));
-    gr.value = String(Math.min(prefs.graphRange, parseInt(gr.max, 10)));
+    gr.min = '20';
+    gr.max = '500';
+    gr.value = String(prefs.graphRange);
   }
   const grv = fsGraphRangeValueEl(); if (grv) grv.textContent = String(prefs.graphRange);
   const gyc = fsGraphYClipEl(); if (gyc) gyc.value = prefs.graphYClip;
@@ -2106,9 +2129,9 @@ export function fsSetCubeConnected(connected: boolean) {
     void newScramble();
   }
   if (!connected && (mode === 'scrambling' || mode === 'inspection' || mode === 'solving' || mode === 'paused')) {
-    // Cube disconnected mid-flow; abort and return to idle.
+    // Cube disconnected mid-flow; abort and return to idle. The status
+    // line shows the "Connect a smart cube…" banner via updateCubeGate.
     resetSolveState();
-    renderStatus('Cube disconnected — connect again to start a new solve.');
   }
 }
 
