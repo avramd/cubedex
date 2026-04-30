@@ -26,6 +26,17 @@ $ npm run build && npm run preview
 $ rm -rf docs && mv dist docs
 ```
 
+## Testing
+
+The Full Solve mode's pure logic (cube predicates, scrambler, phase aggregation, history merge, label layout, etc.) lives in `src/cube/` and `src/fullSolve/` and has unit tests via [vitest](https://vitest.dev/).
+
+```
+$ npm test           # one-shot run (used in CI / pre-port verification)
+$ npm run test:watch # watch mode for active development
+```
+
+After a port to upstream changes, a green `npm test` confirms the logic islands are intact. Wiring/UI is verified separately via [`SMOKE_TEST.md`](./SMOKE_TEST.md).
+
 ## Deploying
 
 If the app is hosted at a path other than the domain root (e.g. `https://example.com/cubedex/`), set `BASE_PATH` at build time:
