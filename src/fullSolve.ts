@@ -3,12 +3,24 @@ import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
+import { type Face, FACES, faceStickers, isSolved } from './cube/facelets';
+import {
+  isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
+} from './cube/predicates';
+import { generateRandomScramble3x3 } from './cube/scramble';
+import { type Process, type SolveRecord } from './fullSolve/types';
+import { moveClass, collapseDoubles } from './fullSolve/moves';
+import { classifyMoves } from './fullSolve/classify';
+import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
+import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
+import { rollingAverage, meanAndSd } from './fullSolve/stats';
+import { placeLabelsAvoidOverlap, remapClippedTargets } from './fullSolve/labelLayout';
 
 Chart.register(...registerables);
 
 // ---------- Types ----------
 
-export type Process = 'cfop' | 'beginner';
+export type { Process } from './fullSolve/types';
 export type Inspection = '3' | '5' | '10' | '15' | 'pause';
 
 interface FullSolvePrefs {
@@ -29,18 +41,6 @@ interface PhaseDef {
   // Check whether this phase's target state has been reached, given the current facelets string.
   predicate: (facelets: string) => boolean;
   color: string;
-}
-
-interface SolveRecord {
-  ts: number;        // Unix ms
-  scramble: string;
-  solution: string;  // moves the user made during the solve, space-separated
-  totalMs: number;
-  // Per-phase ms. Keys match PhaseDef.key for the process/options used.
-  phases: { [key: string]: number };
-  process: Process;
-  twoLookOll: boolean;
-  twoLookPll: boolean;
 }
 
 type Mode = 'idle' | 'scrambling' | 'inspection' | 'solving' | 'paused' | 'done';
@@ -121,32 +121,11 @@ function exportHistoryAsJson() {
   URL.revokeObjectURL(url);
 }
 
-// Merge `incoming` into `history`, deduping by `ts`. On collision, keep the
-// shorter `totalMs` (treats the same physical solve recorded twice as the
-// canonical one — slower duplicates are usually re-derivations or imports
-// from a less-trimmed copy). Returns counts for an after-the-fact summary.
+// Merge `incoming` into the module-level `history`, persist, and return
+// the per-batch counts. Pure merge logic lives in fullSolve/historyMerge.ts.
 function mergeImportedHistory(incoming: any[]): { added: number; replaced: number; skipped: number } {
-  const byTs = new Map<number, SolveRecord>();
-  for (const r of history) byTs.set(r.ts, r);
-  let added = 0, replaced = 0, skipped = 0;
-  for (const r of incoming) {
-    if (!r || typeof r.ts !== 'number' || typeof r.totalMs !== 'number' ||
-        typeof r.scramble !== 'string' || typeof r.solution !== 'string' ||
-        !r.phases || typeof r.process !== 'string') {
-      skipped++;
-      continue;
-    }
-    const existing = byTs.get(r.ts);
-    if (!existing) {
-      byTs.set(r.ts, r as SolveRecord);
-      added++;
-    } else if (r.totalMs < existing.totalMs) {
-      byTs.set(r.ts, r as SolveRecord);
-      replaced++;
-    }
-  }
-  history = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
-  while (history.length > HISTORY_CAP) history.shift();
+  const { merged, added, replaced, skipped } = mergeHistoryPure(history, incoming, HISTORY_CAP);
+  history = merged;
   saveHistory();
   return { added, replaced, skipped };
 }
@@ -168,120 +147,13 @@ function importHistoryFromText(text: string) {
   alert(parts.join('. ') + '.');
 }
 
-// ---------- Facelet helpers & phase predicates ----------
-// Facelet string order (Kociemba): URFDLB, 9 stickers per face, each face in reading order.
-//   0 1 2
-//   3 4 5    (index 4 is the center)
-//   6 7 8
-
-const FACE_OFFSET: Record<'U'|'R'|'F'|'D'|'L'|'B', number> = {
-  U: 0, R: 9, F: 18, D: 27, L: 36, B: 45,
-};
-
-function faceStickers(facelets: string, face: 'U'|'R'|'F'|'D'|'L'|'B'): string[] {
-  const o = FACE_OFFSET[face];
-  return facelets.slice(o, o + 9).split('');
-}
-
-function isFaceMono(facelets: string, face: 'U'|'R'|'F'|'D'|'L'|'B'): boolean {
-  const s = faceStickers(facelets, face);
-  return s.every(c => c === s[4]);
-}
-
-function isSolved(facelets: string): boolean {
-  return (['U','R','F','D','L','B'] as const).every(f => isFaceMono(facelets, f));
-}
-
-// ---- Color-neutral cube geometry ----
+// ---------- Phase predicates (stateful wrappers around pure cube/predicates) ----------
 // Speedcubers solve color-neutral: the "cross face" is whichever face the
 // cuber chose to put on the bottom for this solve. We don't know which until
 // it shows up in the cube state, so each phase predicate dispatches over all
 // 6 candidates until one matches; that face is then locked for the rest of
-// the solve via `detectedCrossFace`.
-
-type Face = 'U'|'R'|'F'|'D'|'L'|'B';
-const FACES: readonly Face[] = ['U','D','F','B','R','L'] as const;
-const OPPOSITE: Record<Face, Face> = { U:'D', D:'U', F:'B', B:'F', R:'L', L:'R' };
-
-// For each cross face X, the 4 (sideFace, stickerIndexOnSide) pairs that
-// touch X's edge stickers — i.e., for cross to be done, every side face's
-// adjacent middle-edge sticker must match its center.
-const CROSS_ADJ: Record<Face, [Face, number][]> = {
-  U: [['B', 1], ['L', 1], ['R', 1], ['F', 1]],
-  D: [['F', 7], ['L', 7], ['R', 7], ['B', 7]],
-  F: [['U', 7], ['L', 5], ['R', 3], ['D', 1]],
-  B: [['U', 1], ['R', 5], ['L', 3], ['D', 7]],
-  R: [['U', 5], ['F', 5], ['B', 3], ['D', 5]],
-  L: [['U', 3], ['B', 5], ['F', 3], ['D', 3]],
-};
-
-// For each cross face X, for each side face, the 6 sticker indices that lie
-// in the "first 2 layers" band (the 2 rows or columns of that side face
-// nearest to X). When X mono AND every side face's band matches that side's
-// center, F2L is done.
-const F2L_BAND: Record<Face, [Face, number[]][]> = {
-  U: [['F',[0,1,2,3,4,5]],['R',[0,1,2,3,4,5]],['B',[0,1,2,3,4,5]],['L',[0,1,2,3,4,5]]],
-  D: [['F',[3,4,5,6,7,8]],['R',[3,4,5,6,7,8]],['B',[3,4,5,6,7,8]],['L',[3,4,5,6,7,8]]],
-  F: [['U',[3,4,5,6,7,8]],['R',[0,1,3,4,6,7]],['D',[0,1,2,3,4,5]],['L',[1,2,4,5,7,8]]],
-  B: [['U',[0,1,2,3,4,5]],['R',[1,2,4,5,7,8]],['D',[3,4,5,6,7,8]],['L',[0,1,3,4,6,7]]],
-  R: [['U',[1,2,4,5,7,8]],['F',[1,2,4,5,7,8]],['D',[1,2,4,5,7,8]],['B',[0,1,3,4,6,7]]],
-  L: [['U',[0,1,3,4,6,7]],['F',[0,1,3,4,6,7]],['D',[0,1,3,4,6,7]],['B',[1,2,4,5,7,8]]],
-};
-
-// For each cross face X, for each side face adjacent to X, the 2 sticker
-// indices that are corners on the OLL (= opposite of X) face side. If those
-// two stickers on each side face match, the corners are permuted (= "PLL
-// corners done", or in our pipeline: 2-look-PLL "headlights" reached).
-const HEADLIGHT: Record<Face, [Face, [number, number]][]> = {
-  U: [['F',[6,8]],['R',[6,8]],['B',[6,8]],['L',[6,8]]],
-  D: [['F',[0,2]],['R',[0,2]],['B',[0,2]],['L',[0,2]]],
-  F: [['U',[0,2]],['R',[2,8]],['D',[6,8]],['L',[0,6]]],
-  B: [['U',[6,8]],['R',[0,6]],['D',[0,2]],['L',[2,8]]],
-  R: [['U',[0,6]],['F',[0,6]],['D',[0,6]],['B',[2,8]]],
-  L: [['U',[2,8]],['F',[2,8]],['D',[2,8]],['B',[0,6]]],
-};
-
-function isCrossDoneOn(face: Face, facelets: string): boolean {
-  const X = faceStickers(facelets, face);
-  if (X[1] !== X[4] || X[3] !== X[4] || X[5] !== X[4] || X[7] !== X[4]) return false;
-  for (const [side, idx] of CROSS_ADJ[face]) {
-    const s = faceStickers(facelets, side);
-    if (s[idx] !== s[4]) return false;
-  }
-  return true;
-}
-
-function isF2LDoneOn(face: Face, facelets: string): boolean {
-  if (!isFaceMono(facelets, face)) return false;
-  for (const [side, indices] of F2L_BAND[face]) {
-    const s = faceStickers(facelets, side);
-    const c = s[4];
-    for (const i of indices) if (s[i] !== c) return false;
-  }
-  return true;
-}
-
-// EOLL: 4 edges of the OLL (= opposite-of-cross) face match that face's center.
-function isEOLLDoneOn(face: Face, facelets: string): boolean {
-  const opp = faceStickers(facelets, OPPOSITE[face]);
-  return opp[1] === opp[4] && opp[3] === opp[4] && opp[5] === opp[4] && opp[7] === opp[4];
-}
-
-// OLL: opposite face is monochrome.
-function isOllDoneOn(face: Face, facelets: string): boolean {
-  return isFaceMono(facelets, OPPOSITE[face]);
-}
-
-// Headlights: each side face's 2 OLL-side corners match each other.
-function isHeadlightsDoneOn(face: Face, facelets: string): boolean {
-  for (const [side, [a, b]] of HEADLIGHT[face]) {
-    const s = faceStickers(facelets, side);
-    if (s[a] !== s[b]) return false;
-  }
-  return true;
-}
-
-// ---- Cross-face detection (locked once detected per solve) ----
+// the solve via `detectedCrossFace`. The pure per-face checks live in
+// src/cube/predicates.ts; the stateful detection logic stays here.
 
 let detectedCrossFace: Face | null = null;
 
@@ -375,36 +247,6 @@ function currentPhaseSequence(): PhaseDef[] {
     seq.push({ key: 'pll', label: 'PLL', predicate: isSolved, color: PHASE_COLORS[5] });
   }
   return seq;
-}
-
-// Human-readable label for a phase key; used by the graph legend/list across solves.
-const PHASE_KEY_LABELS: Record<string, string> = {
-  cross: 'Cross', f2l: 'F2L', oll: 'OLL', pll: 'PLL',
-  eoll: 'EOLL', ocll: 'OCLL', cpll: 'CPLL', epll: 'EPLL',
-  setup: 'Setup', ll: 'LL',
-};
-
-// Look up a phase's milliseconds from a stored record, given the *display*
-// key currently being rendered. Toggling 2-look OLL/PLL only changes how
-// the stack is split visually — the underlying data is preserved:
-//   - When showing the aggregate ('oll'/'pll'), sum any matching split
-//     subphases from the record (so a 2-look-on solve still contributes).
-//   - When showing a split subphase ('eoll'/'ocll'/'cpll'/'epll') against
-//     a record that only has the aggregate, fold the aggregate into the
-//     dominant ("higher stacked") subphase — OCLL absorbs `oll`, EPLL
-//     absorbs `pll` — and the other subphase stays at 0. Total per-solve
-//     time is preserved either way.
-function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
-  const p = r.phases || {};
-  switch (displayKey) {
-    case 'oll':  return (p.oll  ?? 0) + (p.eoll ?? 0) + (p.ocll ?? 0);
-    case 'pll':  return (p.pll  ?? 0) + (p.cpll ?? 0) + (p.epll ?? 0);
-    case 'ocll': return (p.ocll ?? p.oll ?? 0);
-    case 'eoll': return (p.eoll ?? 0);
-    case 'epll': return (p.epll ?? p.pll ?? 0);
-    case 'cpll': return (p.cpll ?? 0);
-    default:     return p[displayKey] ?? 0;
-  }
 }
 
 // ---------- DOM refs ----------
@@ -501,20 +343,6 @@ let graphChart: Chart | null = null;
 // requires a Kociemba-style solver, which cubing.js runs in a Worker —
 // avoided here because Vite's worker bundle pulls in DOM-touching code
 // from the main app and crashes with "document is not defined").
-function generateRandomScramble3x3(length = 25): string {
-  const faces = ['U', 'D', 'L', 'R', 'F', 'B'];
-  const suffixes = ['', "'", '2'];
-  const moves: string[] = [];
-  let prevFace = '';
-  for (let i = 0; i < length; i++) {
-    let face: string;
-    do { face = faces[Math.floor(Math.random() * 6)]; } while (face === prevFace);
-    moves.push(face + suffixes[Math.floor(Math.random() * 3)]);
-    prevFace = face;
-  }
-  return moves.join(' ');
-}
-
 function isHalfTurn(move: string): boolean {
   // Standard 3x3 face/wide turns ending with "2" (e.g., U2, F2, Rw2).
   return /^[A-Za-z]+w?2$/.test(move);
@@ -1224,54 +1052,6 @@ function renderGraph() {
   const labelTextColor = isDarkNow ? '#ffffff' : '#111827';
   const pillBg = isDarkNow ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.92)';
 
-  // Place label anchor y's such that no two are within `spacing` px, while
-  // keeping each label as close to its data-point y as possible. Labels that
-  // don't conflict with anyone (singletons in the merge graph) STAY at their
-  // exact y. Conflicting labels form clusters that get spread evenly with
-  // each cluster's offset chosen to minimise its max |displacement|.
-  // Pool-Adjacent-Violators with per-cluster centering.
-  const placeLabelsAvoidOverlap = (yTargets: number[], spacing: number): number[] => {
-    const n = yTargets.length;
-    if (n === 0) return [];
-    const indices = yTargets.map((_, i) => i).sort((a, b) => yTargets[a] - yTargets[b]);
-    type Cluster = { ys: number[]; p: number; size: number };
-    // Each label starts as its own cluster anchored at its exact y.
-    const clusters: Cluster[] = indices.map(i => ({ ys: [yTargets[i]], p: yTargets[i], size: 1 }));
-    let merged = true;
-    while (merged) {
-      merged = false;
-      for (let i = 0; i < clusters.length - 1; i++) {
-        const a = clusters[i];
-        const b = clusters[i + 1];
-        // a occupies [a.p, a.p + (a.size - 1) * spacing]; require
-        // b.p >= a.p + a.size * spacing for non-overlap.
-        if (b.p < a.p + a.size * spacing) {
-          const ys = a.ys.concat(b.ys);
-          const size = a.size + b.size;
-          let maxD = -Infinity, minD = Infinity;
-          for (let r = 0; r < size; r++) {
-            const d = ys[r] - r * spacing;
-            if (d > maxD) maxD = d;
-            if (d < minD) minD = d;
-          }
-          const p = (maxD + minD) / 2;
-          clusters.splice(i, 2, { ys, p, size });
-          merged = true;
-          break;
-        }
-      }
-    }
-    const out = new Array<number>(n);
-    let cursor = 0;
-    for (const c of clusters) {
-      for (let r = 0; r < c.size; r++) {
-        out[indices[cursor + r]] = c.p + r * spacing;
-      }
-      cursor += c.size;
-    }
-    return out;
-  };
-
   // Custom plugin: on hover, draw per-phase split times at each line's data
   // point — vertically de-overlapped, edge-flipped to stay inside the chart,
   // and prefixed with a legend-style color chit.
@@ -1381,17 +1161,14 @@ function renderGraph() {
       // anchored to their data points; the subsequent de-overlap pass
       // resolves any collision between the clipped stack and a nearby
       // unclipped label.
-      const clipMin = chartArea.top + pillH / 2;
-      const remapClipped = (es: Entry[]): number[] => {
-        const targets = es.map(e => e.point.y);
-        const clippedIdxs: number[] = [];
-        es.forEach((e, i) => { if (e.point.y < chartArea.top) clippedIdxs.push(i); });
-        clippedIdxs.sort((a, b) => es[a].point.y - es[b].point.y);
-        clippedIdxs.forEach((idx, rank) => { targets[idx] = clipMin + rank * minSpacing; });
-        return targets;
-      };
-      const phaseY = placeLabelsAvoidOverlap(remapClipped(phaseEntries), minSpacing);
-      const chitlessY = placeLabelsAvoidOverlap(remapClipped(chitlessEntries), minSpacing);
+      const phaseY = placeLabelsAvoidOverlap(
+        remapClippedTargets(phaseEntries.map(e => e.point.y), chartArea.top, pillH / 2, minSpacing),
+        minSpacing,
+      );
+      const chitlessY = placeLabelsAvoidOverlap(
+        remapClippedTargets(chitlessEntries.map(e => e.point.y), chartArea.top, pillH / 2, minSpacing),
+        minSpacing,
+      );
 
       const hoverX = (phaseEntries[0] ?? chitlessEntries[0])?.point.x;
 
@@ -1600,79 +1377,7 @@ function renderGraph() {
   }
 }
 
-function rollingAverage(values: number[], n: number): (number | null)[] {
-  const out: (number | null)[] = [];
-  for (let i = 0; i < values.length; i++) {
-    if (i + 1 < n) { out.push(null); continue; }
-    const window = values.slice(i + 1 - n, i + 1).slice().sort((a, b) => a - b);
-    // WCA-style: drop best and worst, average the rest.
-    const trimmed = window.slice(1, -1);
-    if (trimmed.length === 0) { out.push(null); continue; }
-    out.push(trimmed.reduce((s, v) => s + v, 0) / trimmed.length);
-  }
-  return out;
-}
-
-function meanAndSd(values: number[]): { mean: number; sd: number } {
-  if (values.length === 0) return { mean: 0, sd: 0 };
-  const mean = values.reduce((s, v) => s + v, 0) / values.length;
-  const sd = Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length);
-  return { mean, sd };
-}
-
 // ---------- Solve list ----------
-
-
-// Move-token typology. Used as a CSS class so the stylesheet can give
-// .clock and .double a tiny right-padding when they aren't the last
-// child of a .turn-group; .c-clock's apostrophe already provides its
-// own visual separation, so it gets no padding.
-function moveClass(m: string): 'clock' | 'c-clock' | 'double' {
-  if (m.endsWith('2')) return 'double';
-  if (m.endsWith("'")) return 'c-clock';
-  return 'clock';
-}
-
-// The face component of a move ("R", "Rw", "U", etc.) — i.e., everything
-// before the optional "'" / "2" suffix. Same-face moves can be merged
-// algebraically modulo 4 quarter-turns.
-function getFace(m: string): string {
-  const match = m.match(/^[A-Za-z]+/);
-  return match ? match[0] : m;
-}
-
-// Sum the quarter-turn count of a same-face move sequence, mod 4.
-//   R = +1, R2 = +2, R' = -1
-function sumQuarters(moves: string[]): number {
-  let n = 0;
-  for (const m of moves) {
-    if (m.endsWith('2')) n += 2;
-    else if (m.endsWith("'")) n -= 1;
-    else n += 1;
-  }
-  return ((n % 4) + 4) % 4;
-}
-
-// Collapse adjacent quarter-turn pairs of the same move into a single
-// half-turn. Smartcubes report half-turns as two consecutive quarter-
-// turn events (so a user U2 lands as ['U', 'U']) — collapsing gives a
-// readable display without affecting how solves are stored. Already-
-// collapsed half-turns and mixed pairs (e.g., R R') are left alone.
-function collapseDoubles(moves: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < moves.length; i++) {
-    const m = moves[i];
-    if (i + 1 < moves.length && m === moves[i + 1] && !m.endsWith('2')) {
-      // R + R = R2;  R' + R' = R2 (also written R'2 but R2 is canonical).
-      const face = m.endsWith("'") ? m.slice(0, -1) : m;
-      out.push(face + '2');
-      i++; // skip the second of the pair
-    } else {
-      out.push(m);
-    }
-  }
-  return out;
-}
 
 // Replace the contents of `target` with a chunked move display: each
 // 4-move chunk is wrapped in a .turn-group span, and each move inside
@@ -1711,45 +1416,12 @@ function setFormattedMoves(target: HTMLElement, seq: string): void {
 function renderSolutionView(target: HTMLElement, moves: string[], showStrikes: boolean): void {
   target.replaceChildren();
 
-  // Pass 1: classify each storage move.
+  // Pass 1: classify each storage move (pure, see fullSolve/classify.ts).
   //   strike      → cancelled; rendered struck-through (or hidden if !showStrikes)
   //   replacement → if set, append an italic equivalent-turn move after this
   //                 storage move (used when no original in a same-face group
   //                 already equals the group's net rotation)
-  type Render = { strike: boolean; replacement: string | null };
-  const renders: Render[] = moves.map(() => ({ strike: false, replacement: null }));
-
-  let i = 0;
-  while (i < moves.length) {
-    const face = getFace(moves[i]);
-    let j = i;
-    while (j < moves.length && getFace(moves[j]) === face) j++;
-    if (j - i >= 2) {
-      const groupMoves = moves.slice(i, j);
-      const netCount = sumQuarters(groupMoves);
-      const netMove = netCount === 1 ? face : netCount === 2 ? face + '2' : netCount === 3 ? face + "'" : null;
-
-      // Self-replacement: prefer keeping a move that already equals the
-      // net rotation (LAST occurrence) instead of striking everything and
-      // adding an italic duplicate. Strikes the rest.
-      let keepAt = -1;
-      if (netMove !== null) {
-        for (let k = j - 1; k >= i; k--) {
-          if (moves[k] === netMove) { keepAt = k; break; }
-        }
-      }
-
-      if (keepAt >= 0) {
-        for (let k = i; k < j; k++) {
-          if (k !== keepAt) renders[k].strike = true;
-        }
-      } else {
-        for (let k = i; k < j; k++) renders[k].strike = true;
-        if (netMove !== null) renders[j - 1].replacement = netMove;
-      }
-    }
-    i = j;
-  }
+  const renders = classifyMoves(moves);
 
   // Pass 2: emit tokens (real / strike / italic) in storage order; chunk
   // by 4 RELEVANT (real + italic) tokens. Strikes are passed through but
