@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build && npx tailwindcss -i ./src/tailwind.css -o ./src/style.css",
     "preview": "vite preview",
-    "deploy": "scripts/deploy.sh"
+    "deploy": "scripts/deploy.sh",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
@@ -16,7 +18,8 @@
     "tailwindcss": "^3.4.19",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite-plugin-pwa": "^1.2.0",
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "@types/jquery": "^3.5.34",
