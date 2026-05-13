@@ -13,4 +13,11 @@ export interface SolveRecord {
   process: Process;
   twoLookOll: boolean;
   twoLookPll: boolean;
+  // Fractional seconds from solve start, one per PHYSICAL move (i.e. one
+  // smartcube event), EXCLUDING paused intervals. Note this may exceed the
+  // move-count parsed from `solution`, since `solution` collapses adjacent
+  // quarter-turn pairs into half-turns at save time. The popup graph uses
+  // this raw per-event series so paces show as the user actually executed
+  // them. Optional for back-compat with records made before this field.
+  turns?: number[];
 }

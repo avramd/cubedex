@@ -102,6 +102,22 @@ describe('mergeImportedHistory — invalid records', () => {
   });
 });
 
+describe('mergeImportedHistory — passthrough of optional fields', () => {
+  it('preserves `turns` on imported records', () => {
+    const incoming = [rec(1, 1000, { turns: [0.1, 0.3, 1.2, 2.4] })];
+    const r = mergeImportedHistory([], incoming, 500);
+    expect(r.merged[0].turns).toEqual([0.1, 0.3, 1.2, 2.4]);
+  });
+
+  it('preserves `turns` when collision keeps the shorter record', () => {
+    const existing = [rec(1, 1500)]; // no turns
+    const incoming = [rec(1, 1000, { turns: [0.5, 1.0] })]; // shorter; should win
+    const r = mergeImportedHistory(existing, incoming, 500);
+    expect(r.merged[0].totalMs).toBe(1000);
+    expect(r.merged[0].turns).toEqual([0.5, 1.0]);
+  });
+});
+
 describe('mergeImportedHistory — cap', () => {
   it('drops the OLDEST records when over cap', () => {
     const existing = [rec(1, 1000), rec(2, 1000)];

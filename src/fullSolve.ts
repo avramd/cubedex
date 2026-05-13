@@ -332,6 +332,9 @@ let timerRafHandle = 0;
 let phaseSeq: PhaseDef[] = [];
 let phaseTimestamps: (number | null)[] = [];   // one per transition point; null until reached
 let solveMoves: string[] = [];
+// Parallel to solveMoves: fractional seconds since solveStartMs at the moment
+// each move arrived, EXCLUDING paused intervals (we subtract pausedAccumMs).
+let solveTurns: number[] = [];
 
 // Graph
 let graphChart: Chart | null = null;
@@ -725,6 +728,7 @@ function resetSolveState() {
   solveEndMs = 0;
   inspectionStartMs = 0;
   solveMoves = [];
+  solveTurns = [];
   halfwayActive = false;
   detectedCrossFace = null;
   phaseSeq = currentPhaseSequence();
@@ -830,6 +834,7 @@ function startSolving() {
 function onSolveMove(move: string) {
   if (mode === 'paused') return; // moves ignored while paused, but still added to history if user wants? For now, ignore.
   solveMoves.push(move);
+  solveTurns.push((Date.now() - solveStartMs - pausedAccumMs) / 1000);
   renderSolutionMoves();
 }
 
@@ -889,6 +894,7 @@ function finishSolve() {
     process: prefs.process,
     twoLookOll: prefs.twoLookOll,
     twoLookPll: prefs.twoLookPll,
+    turns: solveTurns.slice(),
   };
   history.push(record);
   saveHistory();
