@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collapseDoubles, getFace, moveClass, sumQuarters } from './moves';
+import { collapseDoubles, getFace, moveClass, parseScramble, sumQuarters } from './moves';
 
 describe('moveClass', () => {
   it('classifies clockwise quarter-turns', () => {
@@ -96,5 +96,44 @@ describe('collapseDoubles', () => {
   it('is idempotent on already-collapsed input', () => {
     const collapsed = collapseDoubles(['R', 'R', 'U']);
     expect(collapseDoubles(collapsed)).toEqual(collapsed);
+  });
+});
+
+describe('parseScramble', () => {
+  it('returns the cleaned space-separated scramble on a valid input', () => {
+    expect(parseScramble("R U R' U'")).toBe("R U R' U'");
+  });
+
+  it('collapses any internal whitespace runs to single spaces', () => {
+    expect(parseScramble("  R\tU \n F2  ")).toBe('R U F2');
+  });
+
+  it('accepts wide turns and half-turns', () => {
+    expect(parseScramble('Rw Uw2 Lw\'')).toBe('Rw Uw2 Lw\'');
+  });
+
+  it('accepts slice turns and rotations', () => {
+    expect(parseScramble("M E S x y' z2")).toBe("M E S x y' z2");
+  });
+
+  it('accepts lowercase face letters (cubing.js handles them downstream)', () => {
+    expect(parseScramble("r u f'")).toBe("r u f'");
+  });
+
+  it('returns null on empty / whitespace-only input', () => {
+    expect(parseScramble('')).toBeNull();
+    expect(parseScramble('   ')).toBeNull();
+    expect(parseScramble('\n\t')).toBeNull();
+  });
+
+  it('returns null when any token is non-cube notation', () => {
+    expect(parseScramble('R U Q')).toBeNull();    // Q isn't a face
+    expect(parseScramble('R U R12')).toBeNull();  // 12 isn't a valid suffix
+    expect(parseScramble('R U 5')).toBeNull();    // bare digit
+  });
+
+  it("rejects combined modifiers like R'2 / R2'", () => {
+    expect(parseScramble("R'2")).toBeNull();
+    expect(parseScramble("R2'")).toBeNull();
   });
 });

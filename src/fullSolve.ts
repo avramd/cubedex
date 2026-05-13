@@ -9,7 +9,7 @@ import {
 } from './cube/predicates';
 import { generateRandomScramble3x3 } from './cube/scramble';
 import { type Process, type SolveRecord } from './fullSolve/types';
-import { moveClass, collapseDoubles } from './fullSolve/moves';
+import { moveClass, collapseDoubles, parseScramble } from './fullSolve/moves';
 import { classifyMoves } from './fullSolve/classify';
 import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
@@ -270,6 +270,7 @@ const fsRetraceHintEl = () => $$('fs-retrace-hint');
 const fsPauseBtnEl = () => $$<HTMLButtonElement>('fs-pause-btn');
 const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
+const fsPasteScrambleBtnEl = () => $$<HTMLButtonElement>('fs-paste-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
 const fsSolveListHintEl = () => $$('fs-solve-list-hint');
 const fsExportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-export-history');
@@ -1673,6 +1674,26 @@ function wireEvents() {
   });
 
   fsNewScrambleBtnEl()?.addEventListener('click', () => {
+    void newScramble();
+  });
+
+  fsPasteScrambleBtnEl()?.addEventListener('click', async () => {
+    // alert() rather than renderStatus(): the latter is suppressed while
+    // the "Connect a smart cube…" banner is up, but paste should give
+    // feedback even when no cube is connected.
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      alert('Clipboard access denied. Allow clipboard read in your browser settings to paste scrambles.');
+      return;
+    }
+    const cleaned = parseScramble(text);
+    if (!cleaned) {
+      alert('Clipboard content is not a valid scramble. Expected space-separated moves like "R U R\' U\'".');
+      return;
+    }
+    pendingScramble = cleaned;
     void newScramble();
   });
 

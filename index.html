@@ -544,13 +544,14 @@
               </div>
             </div>
 
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex-1 min-w-0">
+            <div>
+              <div class="flex items-center gap-2">
                 <div class="text-xs text-gray-500 dark:text-gray-400">Scramble</div>
-                <div id="fs-scramble-display" class="font-mono text-base sm:text-lg break-words leading-relaxed"></div>
-                <div id="fs-status" class="text-sm text-gray-600 dark:text-gray-300 min-h-[1.25rem] mt-1"></div>
+                <button id="fs-new-scramble-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="New scramble." aria-label="New scramble.">🔀</button>
+                <button id="fs-paste-scramble-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="Paste scramble." aria-label="Paste scramble.">📋</button>
               </div>
-              <button id="fs-new-scramble-btn" class="bg-gray-200 dark:bg-gray-600 text-gray-900 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs sm:text-sm whitespace-nowrap">New Scramble</button>
+              <div id="fs-scramble-display" class="font-mono text-base sm:text-lg break-words leading-relaxed"></div>
+              <div id="fs-status" class="text-sm text-gray-600 dark:text-gray-300 min-h-[1.25rem] mt-1"></div>
             </div>
 
             <div class="flex flex-col gap-2">

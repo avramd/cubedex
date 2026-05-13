@@ -31,6 +31,22 @@ export function sumQuarters(moves: string[]): number {
   return ((n % 4) + 4) % 4;
 }
 
+// Accept face turns (U/D/L/R/F/B), slice turns (M/E/S), rotations
+// (x/y/z), each optionally with `w` (wide) and a single trailing
+// modifier (`'` or `2`). Lowercase face letters (rw equiv. to Rw) are
+// also accepted since cubing.js handles them downstream.
+const MOVE_TOKEN_RE = /^[UDLRFBMESxyzudlrfb]w?(['2])?$/;
+
+// Validate and normalize a user-pasted scramble. Returns the cleaned
+// space-separated scramble on success, or null if any token isn't a
+// recognized move. Empty/whitespace-only input also returns null.
+export function parseScramble(text: string): string | null {
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  for (const t of tokens) if (!MOVE_TOKEN_RE.test(t)) return null;
+  return tokens.join(' ');
+}
+
 // Collapse adjacent quarter-turn pairs of the same move into a single
 // half-turn. Smartcubes report half-turns as two consecutive quarter-
 // turn events (so a user U2 lands as ['U', 'U']) — collapsing gives a
