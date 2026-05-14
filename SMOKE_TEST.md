@@ -65,6 +65,22 @@ Make sure history has at least one solve recorded with 2-look OLL ON (split EOLL
 - [ ] Toggle 2-look OLL **on** → graph splits into EOLL (yellow) + OCLL (orange). Total stack height per solve unchanged.
 - [ ] Same dance for 2-look PLL → CPLL (blue) / EPLL (purple) split vs combined PLL (purple).
 
+## F2L slot splits
+
+Make sure history has at least one fresh solve (recorded after this feature shipped — will have `f2lSplits` in localStorage) and ideally one legacy solve (no `f2lSplits`).
+
+- [ ] Toggle **F2L slots** on → the F2L band of fresh solves splits into up to 4 alpha-scaled sub-bands of the same green (lighter at the bottom, darker at the top). Total stack height per solve unchanged.
+- [ ] Legacy solves (no `f2lSplits`) keep a single full-alpha F2L band even with the toggle on.
+- [ ] Hover a column → still shows exactly **one** F2L line in the chits (not four).
+- [ ] Toggle off → single solid F2L band for all solves.
+
+## Turn-progression popup (📈)
+
+- [ ] Click 📈 on a fresh solve → modal opens with a rising line plot. No metric text on the card; just the chart and ✕.
+- [ ] Phase color bands sit behind the line; their boundaries roughly line up with where slope changes (intuitive sanity check).
+- [ ] ESC, backdrop click, and ✕ all close. Focus returns to the 📈 button.
+- [ ] 📈 on an old solve without turn data is disabled with the right tooltip.
+
 ## Graph hover (two-stage)
 
 - [ ] Hover a column inside the plot axes → guide line + per-phase chits + chitless aggregates (Ao5, Ao12, Solve).

@@ -6,6 +6,7 @@ import { patternToFacelets } from './utils';
 import { type Face, FACES, faceStickers, isSolved } from './cube/facelets';
 import {
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
+  f2lSlotsDoneOn,
 } from './cube/predicates';
 import { generateRandomScramble3x3 } from './cube/scramble';
 import { type Process, type SolveRecord } from './fullSolve/types';
@@ -33,6 +34,11 @@ interface FullSolvePrefs {
   graphYClip: '1sd' | '2sd' | 'log';
   graphAo5: boolean;
   graphAo12: boolean;
+  // When true, split the F2L band of each solve in the main graph into
+  // up to 4 alpha-scaled sub-bands of the same green, one per slot-count
+  // milestone recorded in SolveRecord.f2lSplits. Solves without f2lSplits
+  // (pre-feature records) render as a single full-alpha band regardless.
+  f2lSplits: boolean;
 }
 
 interface PhaseDef {
@@ -59,6 +65,7 @@ const defaultPrefs: FullSolvePrefs = {
   graphYClip: '1sd',
   graphAo5: true,
   graphAo12: true,
+  f2lSplits: false,
 };
 
 function loadPrefs(): FullSolvePrefs {
@@ -290,6 +297,7 @@ const fsGraphRangeValueEl = () => $$('fs-graph-range-value');
 const fsGraphYClipEl = () => $$<HTMLSelectElement>('fs-graph-yclip');
 const fsGraphAo5El = () => $$<HTMLInputElement>('fs-graph-ao5');
 const fsGraphAo12El = () => $$<HTMLInputElement>('fs-graph-ao12');
+const fsGraphF2lSplitsEl = () => $$<HTMLInputElement>('fs-graph-f2l-splits');
 
 // ---------- Runtime state ----------
 
@@ -335,6 +343,11 @@ let solveMoves: string[] = [];
 // Parallel to solveMoves: fractional seconds since solveStartMs at the moment
 // each move arrived, EXCLUDING paused intervals (we subtract pausedAccumMs).
 let solveTurns: number[] = [];
+// Per-solve F2L slot-count progression: ms-from-solveStart at each moment
+// f2lSlotsDoneOn(detectedCrossFace, ...) strictly increased. Monotonic and
+// bounded to 4 entries (matching the 4 F2L slots).
+let solveF2lSplits: number[] = [];
+let f2lSlotsEverDone = 0;
 
 // Graph
 let graphChart: Chart | null = null;
@@ -729,6 +742,8 @@ function resetSolveState() {
   inspectionStartMs = 0;
   solveMoves = [];
   solveTurns = [];
+  solveF2lSplits = [];
+  f2lSlotsEverDone = 0;
   halfwayActive = false;
   detectedCrossFace = null;
   phaseSeq = currentPhaseSequence();
@@ -838,6 +853,23 @@ function onSolveMove(move: string) {
   renderSolutionMoves();
 }
 
+// Sample the F2L slot-count progression. Each strict increase in slot
+// count pushes one entry to solveF2lSplits (ms since solveStart). Bounded
+// to 4 entries (the 4 F2L slots). Skipped for beginner mode (no F2L
+// phase) and before cross has been detected.
+function sampleF2lSlotProgression(facelets: string, now: number) {
+  if (prefs.process === 'beginner') return;
+  if (!detectedCrossFace) return;
+  if (f2lSlotsEverDone >= 4) return;
+  const crossIdx = phaseSeq.findIndex(p => p.key === 'cross');
+  if (crossIdx < 0 || phaseTimestamps[crossIdx] === null) return;
+  const slots = f2lSlotsDoneOn(detectedCrossFace, facelets);
+  while (slots > f2lSlotsEverDone) {
+    f2lSlotsEverDone++;
+    solveF2lSplits.push(now - solveStartMs);
+  }
+}
+
 function evaluatePhaseTransitions(facelets: string) {
   if (mode !== 'solving') return;
   const now = Date.now() - pausedAccumMs;
@@ -852,12 +884,20 @@ function evaluatePhaseTransitions(facelets: string) {
       renderStatus(`Phase reached: ${phaseSeq[i].label}`);
       const nextPhase = phaseSeq[i + 1];
       if (!nextPhase) {
+        // Sample slot progression once more before finishing, so a same-
+        // move cross-done + F2L-done + final-phase-done sequence doesn't
+        // skip recording any intermediate slot increments.
+        sampleF2lSlotProgression(facelets, now);
         if (fired.length > 0) console.log('[fs-phase] fired:', fired.join(','), 'crossFace=', detectedCrossFace);
         finishSolve();
         return;
       }
     }
   }
+  // Catches the common case: between cross-done and F2L-done, every move
+  // arrives here without firing any phase transition; we want to record
+  // slot-count increments anyway.
+  sampleF2lSlotProgression(facelets, now);
   if (fired.length > 0) console.log('[fs-phase] fired:', fired.join(','), 'crossFace=', detectedCrossFace);
 }
 
@@ -895,6 +935,9 @@ function finishSolve() {
     twoLookOll: prefs.twoLookOll,
     twoLookPll: prefs.twoLookPll,
     turns: solveTurns.slice(),
+    // Only attach when we actually recorded splits — keeps records small
+    // for runs that didn't hit the F2L phase (e.g. beginner mode).
+    ...(solveF2lSplits.length > 0 ? { f2lSplits: solveF2lSplits.slice() } : {}),
   };
   history.push(record);
   saveHistory();
@@ -943,8 +986,39 @@ function renderGraph() {
   // hide the combined 'oll'/'pll' labels even if past solves recorded them
   // and vice versa. Solves that lack a key default to 0 duration (the band
   // for that phase sits on top of the band below).
-  const keyOrder = phaseSeq.map(p => p.key);
+  //
+  // When the "F2L slots" toggle is on, expand the F2L key into 4 sub-band
+  // keys (f2l_1..f2l_4) so each renders as a separately-coloured stacked
+  // band. phaseMsForDisplay handles the per-record split using r.f2lSplits.
+  let keyOrder = phaseSeq.map(p => p.key);
+  if (prefs.f2lSplits) {
+    const fIdx = keyOrder.indexOf('f2l');
+    if (fIdx >= 0) {
+      keyOrder = [
+        ...keyOrder.slice(0, fIdx),
+        'f2l_1', 'f2l_2', 'f2l_3', 'f2l_4',
+        ...keyOrder.slice(fIdx + 1),
+      ];
+    }
+  }
   const labels = slice.map((_, i) => `${history.length - slice.length + i + 1}`);
+
+  // Alpha-scaled green for F2L sub-bands. Sub-band 3 keeps the legacy
+  // 0.6 alpha so legacy records (folded into f2l_3) look unchanged.
+  const F2L_SUB_ALPHAS = [0.3, 0.45, 0.6, 0.75];
+  const colorForKey = (k: string): string => {
+    if (k.startsWith('f2l_')) {
+      const n = parseInt(k.slice(4), 10);
+      const a = F2L_SUB_ALPHAS[n - 1] ?? 0.6;
+      return PHASE_COLORS[1].replace(/0\.6\)/, `${a})`);
+    }
+    const def = phaseSeq.find(p => p.key === k);
+    return def?.color ?? PHASE_COLORS[0];
+  };
+  const labelForKey = (k: string): string => {
+    if (k.startsWith('f2l_')) return 'F2L';
+    return PHASE_KEY_LABELS[k] ?? k;
+  };
 
   // For a stacked-area chart without activating Chart.js's scale-level stacking
   // (which would also stack the Ao5/Ao12 trendlines), compute cumulative values
@@ -959,12 +1033,11 @@ function renderGraph() {
   });
 
   const datasets: any[] = keyOrder.map((k, kIdx) => {
-    const phaseDef = phaseSeq[kIdx];
-    const fill = phaseDef?.color ?? PHASE_COLORS[kIdx % PHASE_COLORS.length];
-    const stroke = fill.replace('0.6', '1');
+    const fill = colorForKey(k);
+    const stroke = fill.replace(/(0\.\d+)\)/, '1)');
     return {
       type: 'line' as const,
-      label: PHASE_KEY_LABELS[k] ?? k,
+      label: labelForKey(k),
       data: cumulative.map(row => row[kIdx]),
       backgroundColor: fill,
       borderColor: stroke,
@@ -1111,7 +1184,14 @@ function renderGraph() {
           const r = slice[idx];
           const k = keyOrder[dsIdx];
           if (!r || !k) return;
-          const ms = phaseMsForDisplay(r, k);
+          // F2L sub-band collapse: render exactly one F2L label per solve,
+          // at the topmost sub-band (f2l_4)'s point, summing the per-solve
+          // F2L total. The lower sub-bands skip rendering. This keeps the
+          // hover chit list at a constant length regardless of the toggle.
+          if (k.startsWith('f2l_') && k !== 'f2l_4') return;
+          const ms = k === 'f2l_4'
+            ? phaseMsForDisplay(r, 'f2l')
+            : phaseMsForDisplay(r, k);
           if (ms <= 0) return; // skip 0-duration phases
           valueSec = ms / 1000;
           // Track the topmost (smallest y) phase point — that's where the
@@ -1938,6 +2018,12 @@ function wireEvents() {
     renderStatsLegend();
   });
 
+  fsGraphF2lSplitsEl()?.addEventListener('change', () => {
+    prefs.f2lSplits = !!fsGraphF2lSplitsEl()?.checked;
+    savePrefs();
+    renderGraph();
+  });
+
   fsExportHistoryBtnEl()?.addEventListener('click', () => {
     exportHistoryAsJson();
   });
@@ -1981,6 +2067,7 @@ function applyPrefsToUI() {
   const gyc = fsGraphYClipEl(); if (gyc) gyc.value = prefs.graphYClip;
   const ga5 = fsGraphAo5El(); if (ga5) ga5.checked = prefs.graphAo5;
   const ga12 = fsGraphAo12El(); if (ga12) ga12.checked = prefs.graphAo12;
+  const f2ls = fsGraphF2lSplitsEl(); if (f2ls) f2ls.checked = prefs.f2lSplits;
 }
 
 // ---------- Public API ----------

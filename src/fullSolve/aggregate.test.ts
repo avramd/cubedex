@@ -70,6 +70,69 @@ describe('phaseMsForDisplay — 2-look toggled ON (split keys against records th
   });
 });
 
+describe('phaseMsForDisplay — F2L sub-band keys', () => {
+  it('legacy record (no f2lSplits) folds full F2L into f2l_3, others 0', () => {
+    const r = rec({ f2l: 8000, cross: 1000 });
+    expect(phaseMsForDisplay(r, 'f2l_1')).toBe(0);
+    expect(phaseMsForDisplay(r, 'f2l_2')).toBe(0);
+    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(8000);
+    expect(phaseMsForDisplay(r, 'f2l_4')).toBe(0);
+  });
+
+  it('4 splits → 4 non-zero sub-bands whose sum equals f2l ms', () => {
+    // cross=1s, f2l=10s total; splits land at 2s, 4s, 7s, 11s
+    // since-solve-start. Subtract crossMs=1000 to get within-F2L offsets:
+    // 1s, 3s, 6s, 10s. Sub-band durations: 1, 2, 3, 4.
+    const r: SolveRecord = {
+      ts: 0, scramble: '', solution: '', totalMs: 0,
+      phases: { cross: 1000, f2l: 10000 },
+      process: 'cfop', twoLookOll: false, twoLookPll: false,
+      f2lSplits: [2000, 4000, 7000, 11000],
+    };
+    expect(phaseMsForDisplay(r, 'f2l_1')).toBe(1000);
+    expect(phaseMsForDisplay(r, 'f2l_2')).toBe(2000);
+    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(3000);
+    expect(phaseMsForDisplay(r, 'f2l_4')).toBe(4000);
+    const sum = ['f2l_1','f2l_2','f2l_3','f2l_4']
+      .reduce((s, k) => s + phaseMsForDisplay(r, k), 0);
+    expect(sum).toBe(10000);
+  });
+
+  it('fewer than 4 splits → unrecorded sub-bands collapse to 0 duration', () => {
+    // Only 2 slot increments captured. The remaining sub-bands sit at
+    // f2lMs cap so their duration becomes 0.
+    const r: SolveRecord = {
+      ts: 0, scramble: '', solution: '', totalMs: 0,
+      phases: { cross: 1000, f2l: 5000 },
+      process: 'cfop', twoLookOll: false, twoLookPll: false,
+      f2lSplits: [3000, 4500],
+    };
+    expect(phaseMsForDisplay(r, 'f2l_1')).toBe(2000);
+    expect(phaseMsForDisplay(r, 'f2l_2')).toBe(1500);
+    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(1500); // pads to f2lMs
+    expect(phaseMsForDisplay(r, 'f2l_4')).toBe(0);
+    const sum = ['f2l_1','f2l_2','f2l_3','f2l_4']
+      .reduce((s, k) => s + phaseMsForDisplay(r, k), 0);
+    expect(sum).toBe(5000);
+  });
+
+  it('clamps non-monotonic splits without exploding (defensive)', () => {
+    // Hand-crafted bad data: slot 3's split is BEFORE slot 2's. The
+    // helper should clamp to monotonic without going negative.
+    const r: SolveRecord = {
+      ts: 0, scramble: '', solution: '', totalMs: 0,
+      phases: { cross: 0, f2l: 10000 },
+      process: 'cfop', twoLookOll: false, twoLookPll: false,
+      f2lSplits: [3000, 6000, 5000, 9000], // 5000 < 6000
+    };
+    // sub_3 should clamp to >= sub_2 → duration 0 for sub_3
+    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(0);
+    const sum = ['f2l_1','f2l_2','f2l_3','f2l_4']
+      .reduce((s, k) => s + phaseMsForDisplay(r, k), 0);
+    expect(sum).toBe(10000);
+  });
+});
+
 describe('phaseMsForDisplay — total preservation', () => {
   it('per-record total is the same whether split keys or aggregate keys are summed', () => {
     const r = rec({ cross: 1000, f2l: 4000, eoll: 700, ocll: 1100, cpll: 500, epll: 800 });

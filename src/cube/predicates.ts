@@ -44,6 +44,79 @@ export const HEADLIGHT: Record<Face, [Face, [number, number]][]> = {
   L: [['U',[2,8]],['F',[2,8]],['D',[2,8]],['B',[0,6]]],
 };
 
+// For each cross face X, the 4 F2L slots, each enumerated as 5 (sideFace,
+// stickerIndex) pairs: 1 sticker on the cross face (the slot's corner on
+// X), plus 2 stickers on each adjacent side face (the corner-side sticker
+// + the edge-side sticker). A slot is "done" when all 5 stickers match
+// their respective face centers.
+//
+// Hand-built (not auto-derived from F2L_BAND) because the band aggregates
+// all 4 slots per side together; the structural test below verifies
+// `union of slot stickers per side == band minus center and cross-edge`,
+// which catches any transcription error.
+export const F2L_SLOTS: Record<Face, Array<Array<[Face, number]>>> = {
+  // Cross on D. Slots are at the 4 bottom corners: FR, FL, BR, BL.
+  D: [
+    [['D', 2], ['F', 8], ['R', 6], ['F', 5], ['R', 3]], // FR
+    [['D', 0], ['F', 6], ['L', 8], ['F', 3], ['L', 5]], // FL
+    [['D', 8], ['R', 8], ['B', 6], ['R', 5], ['B', 3]], // BR
+    [['D', 6], ['L', 6], ['B', 8], ['L', 3], ['B', 5]], // BL
+  ],
+  // Cross on U.
+  U: [
+    [['U', 8], ['F', 2], ['R', 0], ['F', 5], ['R', 3]], // FR
+    [['U', 6], ['F', 0], ['L', 2], ['F', 3], ['L', 5]], // FL
+    [['U', 2], ['R', 2], ['B', 0], ['R', 5], ['B', 3]], // BR
+    [['U', 0], ['L', 0], ['B', 2], ['L', 3], ['B', 5]], // BL
+  ],
+  // Cross on F. Slots involve U+L, U+R, D+L, D+R.
+  F: [
+    [['F', 0], ['U', 6], ['L', 2], ['U', 3], ['L', 1]], // UL
+    [['F', 2], ['U', 8], ['R', 0], ['U', 5], ['R', 1]], // UR
+    [['F', 6], ['D', 0], ['L', 8], ['D', 3], ['L', 7]], // DL
+    [['F', 8], ['D', 2], ['R', 6], ['D', 5], ['R', 7]], // DR
+  ],
+  // Cross on B. Slots involve U+R, U+L, D+R, D+L (mirrored vs F because
+  // B is viewed from the opposite side).
+  B: [
+    [['B', 0], ['U', 2], ['R', 2], ['U', 5], ['R', 1]], // UR
+    [['B', 2], ['U', 0], ['L', 0], ['U', 3], ['L', 1]], // UL
+    [['B', 6], ['D', 8], ['R', 8], ['D', 5], ['R', 7]], // DR
+    [['B', 8], ['D', 6], ['L', 6], ['D', 3], ['L', 7]], // DL
+  ],
+  // Cross on R. Slots involve U+F, U+B, D+F, D+B.
+  R: [
+    [['R', 0], ['U', 8], ['F', 2], ['U', 7], ['F', 1]], // UF
+    [['R', 2], ['U', 2], ['B', 0], ['U', 1], ['B', 1]], // UB
+    [['R', 6], ['D', 2], ['F', 8], ['D', 1], ['F', 7]], // DF
+    [['R', 8], ['D', 8], ['B', 6], ['D', 7], ['B', 7]], // DB
+  ],
+  // Cross on L.
+  L: [
+    [['L', 2], ['U', 6], ['F', 0], ['U', 7], ['F', 1]], // UF
+    [['L', 0], ['U', 0], ['B', 2], ['U', 1], ['B', 1]], // UB
+    [['L', 8], ['D', 0], ['F', 6], ['D', 1], ['F', 7]], // DF
+    [['L', 6], ['D', 6], ['B', 8], ['D', 7], ['B', 7]], // DB
+  ],
+};
+
+// Count how many F2L slots are correctly placed under the assumption that
+// `face` is the cross face. A slot is "done" when its 5 stickers each
+// match their own face's center. Returns 0..4. Color-neutral by design:
+// callers pass the (already-detected) cross face in.
+export function f2lSlotsDoneOn(face: Face, facelets: string): number {
+  let count = 0;
+  for (const slot of F2L_SLOTS[face]) {
+    let allMatch = true;
+    for (const [sideFace, idx] of slot) {
+      const s = faceStickers(facelets, sideFace);
+      if (s[idx] !== s[4]) { allMatch = false; break; }
+    }
+    if (allMatch) count++;
+  }
+  return count;
+}
+
 export function isCrossDoneOn(face: Face, facelets: string): boolean {
   const X = faceStickers(facelets, face);
   if (X[1] !== X[4] || X[3] !== X[4] || X[5] !== X[4] || X[7] !== X[4]) return false;

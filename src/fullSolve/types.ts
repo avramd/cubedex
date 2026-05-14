@@ -20,4 +20,10 @@ export interface SolveRecord {
   // this raw per-event series so paces show as the user actually executed
   // them. Optional for back-compat with records made before this field.
   turns?: number[];
+  // Milliseconds-from-solve-start at each successive F2L slot-count
+  // increment (monotonic; up to 4 entries). Used by the "F2L slots" graph
+  // toggle to split the F2L band into sub-bands. Optional / missing on
+  // records made before this field — graph renders those as a single
+  // F2L band even with the toggle on.
+  f2lSplits?: number[];
 }

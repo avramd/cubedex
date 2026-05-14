@@ -19,6 +19,14 @@ export const PHASE_KEY_LABELS: Record<string, string> = {
 //     time is preserved either way.
 export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
   const p = r.phases || {};
+  // F2L sub-band keys: split p.f2l into 4 buckets using r.f2lSplits. Pre-
+  // feature records (no f2lSplits) fold the whole F2L into f2l_3 to keep
+  // the band at the same alpha (0.6) as the legacy single F2L band; the
+  // other sub-bands return 0 (invisible).
+  if (displayKey === 'f2l_1' || displayKey === 'f2l_2'
+      || displayKey === 'f2l_3' || displayKey === 'f2l_4') {
+    return f2lSubBandMs(r, displayKey);
+  }
   switch (displayKey) {
     case 'oll':  return (p.oll  ?? 0) + (p.eoll ?? 0) + (p.ocll ?? 0);
     case 'pll':  return (p.pll  ?? 0) + (p.cpll ?? 0) + (p.epll ?? 0);
@@ -28,4 +36,33 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
     case 'cpll': return (p.cpll ?? 0);
     default:     return p[displayKey] ?? 0;
   }
+}
+
+function f2lSubBandMs(r: SolveRecord, k: 'f2l_1' | 'f2l_2' | 'f2l_3' | 'f2l_4'): number {
+  const p = r.phases || {};
+  const f2lMs = p.f2l ?? 0;
+  const splits = r.f2lSplits;
+  if (!splits || splits.length === 0) {
+    // Legacy record. Fold the whole F2L into sub-band 3 so the band
+    // renders at alpha 0.6 (matching the original single-band look).
+    return k === 'f2l_3' ? f2lMs : 0;
+  }
+  const crossMs = p.cross ?? 0;
+  // splits[i] is ms-from-solveStart at slot count (i+1). Convert to
+  // ms-from-F2L-start. Pad missing trailing entries with f2lMs (cap).
+  const subEnds: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    if (i < splits.length) subEnds.push(Math.max(0, Math.min(splits[i] - crossMs, f2lMs)));
+    else subEnds.push(f2lMs);
+  }
+  // Ensure monotonic (defensive against same-tick recording artefacts).
+  for (let i = 1; i < 4; i++) if (subEnds[i] < subEnds[i - 1]) subEnds[i] = subEnds[i - 1];
+  // The 4th sub-band always ends at f2lMs — F2L done = slot 4 done by
+  // predicate definition, so any short trailing recording (or buggy
+  // input) shouldn't leak unaccounted ms.
+  subEnds[3] = f2lMs;
+  const idx = parseInt(k.slice(4), 10) - 1; // 0..3
+  const start = idx === 0 ? 0 : subEnds[idx - 1];
+  const end = subEnds[idx];
+  return Math.max(0, end - start);
 }

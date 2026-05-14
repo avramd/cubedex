@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { type Face, FACES, FACE_OFFSET, OPPOSITE } from './facelets';
 import {
-  CROSS_ADJ, F2L_BAND, HEADLIGHT,
+  CROSS_ADJ, F2L_BAND, F2L_SLOTS, HEADLIGHT,
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
-  isAnyEdgeCrossOn, firstMatchingFace,
+  f2lSlotsDoneOn, isAnyEdgeCrossOn, firstMatchingFace,
 } from './predicates';
 
 // Solved cube using face letters as colors (URFDLB layout, 9 stickers each).
@@ -188,6 +188,71 @@ describe('isAnyEdgeCrossOn', () => {
     const s = paintIndices(SOLVED, 'U', [0, 2, 6, 8], 'X');
     expect(isAnyEdgeCrossOn('U', s)).toBe(true);
   });
+});
+
+describe('f2lSlotsDoneOn', () => {
+  it('returns 4 on a fully solved cube for every cross face', () => {
+    for (const f of FACES) expect(f2lSlotsDoneOn(f, SOLVED)).toBe(4);
+  });
+
+  it('drops to 3 when one slot has a wrong sticker (cross=D, FR slot edge)', () => {
+    // F2L_SLOTS.D[0] is FR with edge stickers F[5] + R[3].
+    expect(f2lSlotsDoneOn('D', setSticker(SOLVED, 'F', 5, 'X'))).toBe(3);
+  });
+
+  it('drops to 3 when only the cross-face sticker of one slot is wrong', () => {
+    // D[2] is FR's cross-face sticker.
+    expect(f2lSlotsDoneOn('D', setSticker(SOLVED, 'D', 2, 'X'))).toBe(3);
+  });
+
+  it('counts independently per slot — breaking 2 slots gives 2', () => {
+    let s = setSticker(SOLVED, 'D', 2, 'X');  // breaks FR
+    s = setSticker(s, 'L', 5, 'X');           // breaks FL (edge sticker on L)
+    expect(f2lSlotsDoneOn('D', s)).toBe(2);
+  });
+
+  it('returns 0 when LL face is scrambled but no F2L slot is broken (counter-test)', () => {
+    // Mess with U corners only — U-face stickers aren't in any cross=D F2L
+    // slot, so the count should stay at 4. This verifies the predicate
+    // doesn't over-read from outside the slots.
+    let s = setSticker(SOLVED, 'U', 0, 'X');
+    s = setSticker(s, 'U', 8, 'X');
+    expect(f2lSlotsDoneOn('D', s)).toBe(4);
+  });
+
+  it('color-neutral spot-check: works on cross=F too', () => {
+    expect(f2lSlotsDoneOn('F', SOLVED)).toBe(4);
+    // F2L_SLOTS.F[0] is UL with corner stickers F[0], U[6], L[2].
+    expect(f2lSlotsDoneOn('F', setSticker(SOLVED, 'U', 6, 'X'))).toBe(3);
+  });
+});
+
+describe('F2L_SLOTS / F2L_BAND structural invariant', () => {
+  // For each cross face, the union of slot stickers on each side face must
+  // equal the F2L_BAND entries for that side minus the center (always
+  // index 4) and the cross-edge (the side-face index from CROSS_ADJ).
+  // This catches any transcription error in either table.
+  for (const cross of FACES) {
+    it(`union(slots[side]) === F2L_BAND[${cross}].side − {center, cross-edge}`, () => {
+      const slots = F2L_SLOTS[cross];
+      const band = F2L_BAND[cross];
+      const crossEdgeForSide = new Map<Face, number>();
+      for (const [side, idx] of CROSS_ADJ[cross]) crossEdgeForSide.set(side, idx);
+      for (const [side, bandIdxs] of band) {
+        const expected = new Set(bandIdxs);
+        expected.delete(4);
+        const ce = crossEdgeForSide.get(side);
+        if (ce != null) expected.delete(ce);
+        const actual = new Set<number>();
+        for (const slot of slots) {
+          for (const [s, idx] of slot) {
+            if (s === side) actual.add(idx);
+          }
+        }
+        expect([...actual].sort((a, b) => a - b)).toEqual([...expected].sort((a, b) => a - b));
+      }
+    });
+  }
 });
 
 describe('firstMatchingFace', () => {
