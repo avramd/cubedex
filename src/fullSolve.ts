@@ -360,6 +360,12 @@ const PHASE_COLORS = [
   'rgba(139, 92, 246, 0.6)',   // purple — EPLL / PLL
 ];
 
+// The canonical RECORDING phase sequence — what phase detection watches
+// for and what gets stored on each SolveRecord. Always emits the fully
+// split form (EOLL→OCLL, CPLL→EPLL) in CFOP so the data is captured
+// regardless of the user's display preference; the 2-look toggles only
+// influence how the bands are drawn after the fact. Use displayPhaseSequence
+// for legend / graph rendering.
 function currentPhaseSequence(): PhaseDef[] {
   if (prefs.process === 'beginner') {
     // Until beginner intermediate phases are defined, track 2 buckets:
@@ -369,26 +375,37 @@ function currentPhaseSequence(): PhaseDef[] {
       { key: 'll', label: 'LL', predicate: isSolved, color: PHASE_COLORS[4] },
     ];
   }
-  const seq: PhaseDef[] = [
+  return [
     { key: 'cross', label: 'Cross', predicate: isCrossDone, color: PHASE_COLORS[0] },
-    { key: 'f2l', label: 'F2L', predicate: isF2LDone, color: PHASE_COLORS[1] },
+    { key: 'f2l',   label: 'F2L',   predicate: isF2LDone,   color: PHASE_COLORS[1] },
+    { key: 'eoll',  label: 'EOLL',  predicate: isYellowCrossDone, color: PHASE_COLORS[2] },
+    { key: 'ocll',  label: 'OCLL',  predicate: isOllDone,   color: PHASE_COLORS[3] },
+    { key: 'cpll',  label: 'CPLL',  predicate: (f) => isOllDone(f) && isHeadlightsDone(f), color: PHASE_COLORS[4] },
+    { key: 'epll',  label: 'EPLL',  predicate: isSolved,    color: PHASE_COLORS[5] },
   ];
-  if (prefs.twoLookOll) {
-    seq.push({ key: 'eoll', label: 'EOLL', predicate: isYellowCrossDone, color: PHASE_COLORS[2] });
-    seq.push({ key: 'ocll', label: 'OCLL', predicate: isOllDone, color: PHASE_COLORS[3] });
-  } else {
-    // Aggregate OLL takes the higher-stacked subphase's color (OCLL = orange)
-    // so it visually matches the top of the EOLL+OCLL stack from 2-look mode.
-    seq.push({ key: 'oll', label: 'OLL', predicate: isOllDone, color: PHASE_COLORS[3] });
+}
+
+// What the legend and stacked-area graph show. Collapses EOLL+OCLL into
+// a single OLL band (and CPLL+EPLL into PLL) when the respective 2-look
+// toggle is off, taking the higher-stacked subphase's color so the
+// aggregate visually matches the top of the split stack.
+function displayPhaseSequence(): PhaseDef[] {
+  const seq = currentPhaseSequence();
+  if (prefs.process !== 'cfop') return seq;
+  const out: PhaseDef[] = [];
+  for (let i = 0; i < seq.length; i++) {
+    const p = seq[i];
+    if (!prefs.twoLookOll && p.key === 'eoll' && seq[i + 1]?.key === 'ocll') {
+      out.push({ key: 'oll', label: 'OLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
+      i++;
+    } else if (!prefs.twoLookPll && p.key === 'cpll' && seq[i + 1]?.key === 'epll') {
+      out.push({ key: 'pll', label: 'PLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
+      i++;
+    } else {
+      out.push(p);
+    }
   }
-  if (prefs.twoLookPll) {
-    seq.push({ key: 'cpll', label: 'CPLL', predicate: (f) => isOllDone(f) && isHeadlightsDone(f), color: PHASE_COLORS[4] });
-    seq.push({ key: 'epll', label: 'EPLL', predicate: isSolved, color: PHASE_COLORS[5] });
-  } else {
-    // Aggregate PLL takes EPLL's color (purple) — same rationale as OLL above.
-    seq.push({ key: 'pll', label: 'PLL', predicate: isSolved, color: PHASE_COLORS[5] });
-  }
-  return seq;
+  return out;
 }
 
 // ---------- DOM refs ----------
@@ -584,7 +601,7 @@ function renderStatsLegend() {
   const el = statsLegendEl();
   if (!el) return;
   const items: string[] = [];
-  phaseSeq.forEach((p) => {
+  displayPhaseSequence().forEach((p) => {
     // Legend swatches use the phase's hue at full opacity (regardless of
     // the band's stacked-area alpha). Match-and-replace the alpha value.
     const color = p.color.replace(/,\s*[\d.]+\)\s*$/, ', 1)');
@@ -1134,7 +1151,8 @@ function renderGraph() {
   // When the "F2L slots" toggle is on, expand the F2L key into 4 sub-band
   // keys (f2l_1..f2l_4) so each renders as a separately-coloured stacked
   // band. phaseMsForDisplay handles the per-record split using r.f2lSplits.
-  let keyOrder = phaseSeq.map(p => p.key);
+  const displaySeq = displayPhaseSequence();
+  let keyOrder = displaySeq.map(p => p.key);
   if (prefs.f2lSplits) {
     const fIdx = keyOrder.indexOf('f2l');
     if (fIdx >= 0) {
@@ -1159,7 +1177,7 @@ function renderGraph() {
       // (PHASE_COLORS[1] itself uses 0.75 to match the topmost sub-band.)
       return PHASE_COLORS[1].replace(/,\s*[\d.]+\)\s*$/, `, ${a})`);
     }
-    const def = phaseSeq.find(p => p.key === k);
+    const def = displaySeq.find(p => p.key === k);
     return def?.color ?? PHASE_COLORS[0];
   };
   const labelForKey = (k: string): string => {
@@ -1721,15 +1739,22 @@ function renderSolutionView(target: HTMLElement, moves: string[], showStrikes: b
 // labels are overlaid — the slope itself encodes pace.
 
 // Canonical phase order for a stored solve, used by the phase color bands
-// behind the line. Mirrors currentPhaseSequence() but operates on the
-// record's own options rather than current prefs, so a 2-look-OLL solve
-// keeps EOLL/OCLL split bands even if the user has since toggled 2-look
-// off in the main settings.
+// behind the line. Follows the current 2-look display toggles so the
+// popup's banding matches the main graph: when the user has 2-look OLL
+// on AND the record has the split fields, render eoll + ocll; otherwise
+// fold to a single oll band. Same for PLL. phaseMsForDisplay handles the
+// underlying ms aggregation either way.
 function phaseOrderForRecord(r: SolveRecord): string[] {
   if (r.process === 'beginner') return ['setup', 'll'];
   const out: string[] = ['cross', 'f2l'];
-  if (r.twoLookOll) out.push('eoll', 'ocll'); else out.push('oll');
-  if (r.twoLookPll) out.push('cpll', 'epll'); else out.push('pll');
+  const hasOllSplit = typeof r.phases?.eoll === 'number' && typeof r.phases?.ocll === 'number';
+  const hasOllAny = hasOllSplit || typeof r.phases?.oll === 'number';
+  if (prefs.twoLookOll && hasOllSplit) out.push('eoll', 'ocll');
+  else if (hasOllAny) out.push('oll');
+  const hasPllSplit = typeof r.phases?.cpll === 'number' && typeof r.phases?.epll === 'number';
+  const hasPllAny = hasPllSplit || typeof r.phases?.pll === 'number';
+  if (prefs.twoLookPll && hasPllSplit) out.push('cpll', 'epll');
+  else if (hasPllAny) out.push('pll');
   return out;
 }
 
@@ -1818,8 +1843,10 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
   let acc = 0;
   const bands: { start: number; end: number; color: string }[] = [];
   for (const key of order) {
-    const ms = r.phases?.[key];
-    if (typeof ms !== 'number' || ms <= 0) continue;
+    // Use phaseMsForDisplay so aggregate keys ('oll'/'pll') pick up split
+    // fields when the record has them but the toggle is off.
+    const ms = phaseMsForDisplay(r, key);
+    if (!Number.isFinite(ms) || ms <= 0) continue;
     const start = acc / 1000;
     acc += ms;
     const end = acc / 1000;
@@ -2121,10 +2148,12 @@ function wireEvents() {
     savePrefs();
   });
 
+  // 2-look toggles are display-only: splits are always recorded into the
+  // SolveRecord; the toggles just choose whether the legend/graph collapses
+  // EOLL+OCLL into one OLL band (and CPLL+EPLL into one PLL band).
   fsTwoLookOllEl()?.addEventListener('change', () => {
     prefs.twoLookOll = !!fsTwoLookOllEl()?.checked;
     savePrefs();
-    resetSolveState();
     renderStatsLegend();
     renderStatsBoxes();
     renderGraph();
@@ -2133,7 +2162,6 @@ function wireEvents() {
   fsTwoLookPllEl()?.addEventListener('change', () => {
     prefs.twoLookPll = !!fsTwoLookPllEl()?.checked;
     savePrefs();
-    resetSolveState();
     renderStatsLegend();
     renderStatsBoxes();
     renderGraph();
