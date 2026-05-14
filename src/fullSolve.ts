@@ -1479,6 +1479,186 @@ function renderSolutionView(target: HTMLElement, moves: string[], showStrikes: b
   }
 }
 
+// ---------- Turn-progression popup ----------
+// A minimal pop-up chart triggered by the 📈 button on a past-solves row.
+// One data point per physical turn at (elapsed seconds, turn number) so
+// pauses read as flat sections and bursts as steep slope. No metrics or
+// labels are overlaid — the slope itself encodes pace.
+
+// Canonical phase order for a stored solve, used by the phase color bands
+// behind the line. Mirrors currentPhaseSequence() but operates on the
+// record's own options rather than current prefs, so a 2-look-OLL solve
+// keeps EOLL/OCLL split bands even if the user has since toggled 2-look
+// off in the main settings.
+function phaseOrderForRecord(r: SolveRecord): string[] {
+  if (r.process === 'beginner') return ['setup', 'll'];
+  const out: string[] = ['cross', 'f2l'];
+  if (r.twoLookOll) out.push('eoll', 'ocll'); else out.push('oll');
+  if (r.twoLookPll) out.push('cpll', 'epll'); else out.push('pll');
+  return out;
+}
+
+// Color per phase key. Mirrors the choices made in currentPhaseSequence()
+// — notably aggregate OLL uses OCLL's color (orange) so it matches the
+// top of the EOLL+OCLL stack when the toggle is on.
+const PHASE_COLOR_BY_KEY: Record<string, string> = {
+  cross: PHASE_COLORS[0],
+  f2l:   PHASE_COLORS[1],
+  eoll:  PHASE_COLORS[2],
+  ocll:  PHASE_COLORS[3],
+  oll:   PHASE_COLORS[3],
+  cpll:  PHASE_COLORS[4],
+  epll:  PHASE_COLORS[5],
+  pll:   PHASE_COLORS[5],
+  setup: PHASE_COLORS[0],
+  ll:    PHASE_COLORS[4],
+};
+
+let turnGraphPopupChart: Chart | null = null;
+
+function closeTurnGraphPopup() {
+  const el = document.getElementById('fs-turn-graph-popup');
+  if (!el) return;
+  document.removeEventListener('keydown', onTurnGraphPopupKey);
+  if (turnGraphPopupChart) { turnGraphPopupChart.destroy(); turnGraphPopupChart = null; }
+  const opener = (el as any)._opener as HTMLElement | undefined;
+  el.remove();
+  // Restore focus to the 📈 button the user clicked, so keyboard nav lands
+  // back where they started.
+  if (opener && document.body.contains(opener)) opener.focus();
+}
+
+function onTurnGraphPopupKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') { e.preventDefault(); closeTurnGraphPopup(); }
+}
+
+function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
+  if (!r.turns || r.turns.length < 2) return;
+  closeTurnGraphPopup();
+
+  const backdrop = document.createElement('div');
+  backdrop.id = 'fs-turn-graph-popup';
+  backdrop.setAttribute('role', 'dialog');
+  backdrop.setAttribute('aria-modal', 'true');
+  backdrop.className = 'fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4';
+  (backdrop as any)._opener = opener;
+  backdrop.addEventListener('click', (e) => {
+    // Backdrop click closes; clicks inside the card don't bubble out as
+    // backdrop clicks because of stopPropagation below.
+    if (e.target === backdrop) closeTurnGraphPopup();
+  });
+
+  const card = document.createElement('div');
+  card.className = 'relative bg-white dark:bg-gray-800 rounded-lg shadow-xl p-4 max-w-2xl w-full';
+  card.addEventListener('click', (e) => e.stopPropagation());
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.className = 'absolute top-2 right-2 leading-none px-2 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => closeTurnGraphPopup());
+
+  const canvasWrap = document.createElement('div');
+  canvasWrap.className = 'relative w-full h-[60vh] sm:h-[420px] mt-4';
+  const canvas = document.createElement('canvas');
+  canvas.className = 'w-full h-full';
+  canvasWrap.appendChild(canvas);
+
+  card.appendChild(closeBtn);
+  card.appendChild(canvasWrap);
+  backdrop.appendChild(card);
+  document.body.appendChild(backdrop);
+
+  document.addEventListener('keydown', onTurnGraphPopupKey);
+  closeBtn.focus();
+
+  // Build phase-band x-extents (in seconds) from r.phases in canonical
+  // order. Falls back to no bands if r.phases is empty.
+  const order = phaseOrderForRecord(r);
+  let acc = 0;
+  const bands: { start: number; end: number; color: string }[] = [];
+  for (const key of order) {
+    const ms = r.phases?.[key];
+    if (typeof ms !== 'number' || ms <= 0) continue;
+    const start = acc / 1000;
+    acc += ms;
+    const end = acc / 1000;
+    const color = PHASE_COLOR_BY_KEY[key] ?? PHASE_COLORS[0];
+    bands.push({ start, end, color });
+  }
+
+  const isDark = document.documentElement.classList.contains('dark');
+  const axisColor = isDark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)';
+  const gridColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
+  const lineColor = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.85)';
+
+  const phaseBandsPlugin = {
+    id: 'turnGraphPhaseBands',
+    // `beforeDraw` runs BEFORE the chart's grid lines are drawn, so the
+    // grid (and axis tick lines) end up rendered on top of the bands
+    // instead of underneath them. `beforeDatasetsDraw` would put the
+    // bands on top of the grid — wrong for this use.
+    beforeDraw(chart: any) {
+      if (bands.length === 0) return;
+      const ctx: CanvasRenderingContext2D = chart.ctx;
+      const xs = chart.scales.x;
+      const ca = chart.chartArea;
+      ctx.save();
+      for (const b of bands) {
+        const x0 = xs.getPixelForValue(b.start);
+        const x1 = xs.getPixelForValue(b.end);
+        ctx.fillStyle = b.color;
+        ctx.fillRect(x0, ca.top, x1 - x0, ca.bottom - ca.top);
+      }
+      ctx.restore();
+    },
+  };
+
+  turnGraphPopupChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      datasets: [{
+        data: r.turns.map((t, i) => ({ x: t, y: i + 1 })),
+        showLine: true,
+        borderColor: lineColor,
+        borderWidth: 1,
+        pointRadius: 2,
+        pointBackgroundColor: lineColor,
+        tension: 0,
+      }],
+    },
+    plugins: [phaseBandsPlugin],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: 'elapsed (s)', color: axisColor },
+          ticks: { color: axisColor },
+          grid: { color: gridColor },
+          min: 0,
+          max: Math.max(...r.turns) + 0.5,
+        },
+        y: {
+          type: 'linear',
+          title: { display: true, text: 'turn', color: axisColor },
+          ticks: { color: axisColor, precision: 0 },
+          grid: { color: gridColor },
+          min: 0,
+          max: r.turns.length + 1,
+        },
+      },
+    },
+  });
+}
+
 function renderSolveList() {
   const listEl = fsSolveListEl();
   if (!listEl) return;
@@ -1519,6 +1699,23 @@ function renderSolveList() {
     const actions = document.createElement('div');
     actions.className = 'flex items-center gap-0';
     const iconBtnClass = 'leading-none px-1 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed';
+
+    // 📈 opens the turn-progression popup for this solve. Placed first so
+    // it's visually grouped with the row's time/scramble (which is what
+    // it visualises) rather than with the destructive/mutating buttons on
+    // the right. Disabled when the record lacks per-turn timestamps
+    // (pre-feature solves) or has too few points to plot meaningfully.
+    const turnGraphBtn = document.createElement('button');
+    turnGraphBtn.className = iconBtnClass;
+    turnGraphBtn.textContent = '📈';
+    const hasEnoughTurns = !!r.turns && r.turns.length >= 2;
+    turnGraphBtn.title = hasEnoughTurns ? 'Show turn-progression graph' : 'No turn data for this solve';
+    turnGraphBtn.disabled = !hasEnoughTurns;
+    turnGraphBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openTurnGraphPopup(r, turnGraphBtn);
+    });
+    actions.appendChild(turnGraphBtn);
 
     const copyBtn = document.createElement('button');
     copyBtn.className = iconBtnClass;
