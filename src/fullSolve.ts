@@ -137,12 +137,82 @@ function mergeImportedHistory(incoming: any[]): { added: number; replaced: numbe
   return { added, replaced, skipped };
 }
 
+// ---------- F2L splits backfill ----------
+// For records that have `turns` but no `f2lSplits` — i.e. solves recorded
+// after the turn-timestamp feature but before slot tracking — we can
+// re-derive splits by replaying scramble + solution and watching the slot
+// count progression. Mid-half-turn intermediate state is approximated:
+// the COLLAPSED solution is applied directly (R2 in one shot, not R + R),
+// so a slot that would have completed exactly between the two physical
+// quarter-turns of a pair gets attributed to the second one (≤ ~200ms
+// timing error in practice, acceptable for visualisation).
+
+function recomputeF2lSplitsFor(r: SolveRecord): number[] | null {
+  if (!kpuzzle) return null;
+  if (r.process === 'beginner') return null;
+  if (!r.turns || r.turns.length === 0) return null;
+  let p = kpuzzle.defaultPattern();
+  for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
+    try { p = p.applyMove(m); } catch { return null; }
+  }
+  const tokens = r.solution.split(/\s+/).filter(Boolean);
+  let physicalIdx = 0; // index into r.turns of the most-recent physical event
+  let crossFace: Face | null = null;
+  let slotsEver = 0;
+  const splits: number[] = [];
+  for (const t of tokens) {
+    try { p = p.applyMove(t); } catch { return null; }
+    // A half-turn token corresponds to 2 physical events; advance the
+    // timestamp pointer accordingly.
+    physicalIdx += t.endsWith('2') ? 2 : 1;
+    let facelets: string;
+    try { facelets = patternToFacelets(p); } catch { continue; }
+    if (!crossFace) {
+      for (const f of FACES) {
+        if (isCrossDoneOn(f, facelets)) { crossFace = f; break; }
+      }
+      if (!crossFace) continue;
+    }
+    if (slotsEver >= 4) continue;
+    const slots = f2lSlotsDoneOn(crossFace, facelets);
+    while (slots > slotsEver) {
+      slotsEver++;
+      const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
+      const seconds = r.turns[tIdx] ?? 0;
+      splits.push(Math.round(seconds * 1000));
+    }
+  }
+  return splits.length > 0 ? splits : null;
+}
+
+function backfillF2lSplits() {
+  if (!kpuzzle) return;
+  let updated = 0;
+  for (const r of history) {
+    if (r.f2lSplits) continue;
+    if (!r.turns || r.turns.length === 0) continue;
+    if (r.process === 'beginner') continue;
+    const splits = recomputeF2lSplitsFor(r);
+    if (splits && splits.length > 0) {
+      r.f2lSplits = splits;
+      updated++;
+    }
+  }
+  if (updated > 0) {
+    saveHistory();
+    if (prefs.enabled) renderGraph();
+  }
+}
+
 function importHistoryFromText(text: string) {
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { alert('Import failed: invalid JSON.'); return; }
   if (!Array.isArray(parsed)) { alert('Import failed: expected a JSON array of solves.'); return; }
   const before = history.length;
   const { added, replaced, skipped } = mergeImportedHistory(parsed);
+  // Imported records may have `turns` but no `f2lSplits`; replay them so
+  // the F2L-slots toggle has data to show.
+  backfillF2lSplits();
   renderGraph();
   renderStatsBoxes();
   renderStatsLegend();
@@ -218,7 +288,11 @@ function isHeadlightsDone(facelets: string): boolean {
 //   2-look PLL:  blue (CPLL)   → purple (EPLL)
 const PHASE_COLORS = [
   'rgba(236, 72, 153, 0.6)',   // pink — cross
-  'rgba(16, 185, 129, 0.6)',   // green — F2L
+  // F2L runs at alpha 0.75 so the unsplit / no-data band reads at the
+  // same saturation as the topmost sub-band when the F2L-slots toggle is
+  // on. F2L is usually the largest phase by far, so its higher contrast
+  // is also visually appropriate.
+  'rgba(16, 185, 129, 0.75)',  // green — F2L
   'rgba(234, 179, 8, 0.6)',    // yellow — yellow-cross (2-look OLL) / OLL
   'rgba(249, 115, 22, 0.6)',   // orange — full OLL (2-look OLL) / headlights (2-look PLL)
   'rgba(59, 130, 246, 0.6)',   // blue — CPLL (2-look PLL)
@@ -304,7 +378,14 @@ const fsGraphF2lSplitsEl = () => $$<HTMLInputElement>('fs-graph-f2l-splits');
 let kpuzzle: KPuzzle | null = null;
 let lastPattern: KPattern | null = null;   // most recent pattern from twistyTracker
 let myPattern: KPattern | null = null;     // internally-maintained; applyMove on each physical move
-cube3x3x3.kpuzzle().then(kp => { kpuzzle = kp; });
+cube3x3x3.kpuzzle().then(kp => {
+  kpuzzle = kp;
+  // Records made between the turn-timestamps feature and the F2L-slots
+  // feature have `turns` but no `f2lSplits`. Replay them now that we have
+  // the kpuzzle, so the F2L-slots toggle visualises every applicable
+  // historical solve uniformly.
+  backfillF2lSplits();
+});
 
 let mode: Mode = 'idle';
 let cubeConnected = false;
@@ -443,7 +524,9 @@ function renderStatsLegend() {
   if (!el) return;
   const items: string[] = [];
   phaseSeq.forEach((p) => {
-    const color = p.color.replace('0.6', '1');
+    // Legend swatches use the phase's hue at full opacity (regardless of
+    // the band's stacked-area alpha). Match-and-replace the alpha value.
+    const color = p.color.replace(/,\s*[\d.]+\)\s*$/, ', 1)');
     items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${p.label}</span>`);
   });
   const isDark = document.documentElement.classList.contains('dark');
@@ -1003,14 +1086,17 @@ function renderGraph() {
   }
   const labels = slice.map((_, i) => `${history.length - slice.length + i + 1}`);
 
-  // Alpha-scaled green for F2L sub-bands. Sub-band 3 keeps the legacy
-  // 0.6 alpha so legacy records (folded into f2l_3) look unchanged.
+  // Alpha-scaled green for F2L sub-bands. Legacy records (no f2lSplits)
+  // are folded into sub-band 4 by phaseMsForDisplay, so they render at
+  // the topmost (darkest) saturation.
   const F2L_SUB_ALPHAS = [0.3, 0.45, 0.6, 0.75];
   const colorForKey = (k: string): string => {
     if (k.startsWith('f2l_')) {
       const n = parseInt(k.slice(4), 10);
       const a = F2L_SUB_ALPHAS[n - 1] ?? 0.6;
-      return PHASE_COLORS[1].replace(/0\.6\)/, `${a})`);
+      // Replace whatever alpha sits on PHASE_COLORS[1] with the sub-band's.
+      // (PHASE_COLORS[1] itself uses 0.75 to match the topmost sub-band.)
+      return PHASE_COLORS[1].replace(/,\s*[\d.]+\)\s*$/, `, ${a})`);
     }
     const def = phaseSeq.find(p => p.key === k);
     return def?.color ?? PHASE_COLORS[0];

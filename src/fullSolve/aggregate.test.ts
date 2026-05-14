@@ -71,12 +71,12 @@ describe('phaseMsForDisplay — 2-look toggled ON (split keys against records th
 });
 
 describe('phaseMsForDisplay — F2L sub-band keys', () => {
-  it('legacy record (no f2lSplits) folds full F2L into f2l_3, others 0', () => {
+  it('legacy record (no f2lSplits) folds full F2L into f2l_4, others 0', () => {
     const r = rec({ f2l: 8000, cross: 1000 });
     expect(phaseMsForDisplay(r, 'f2l_1')).toBe(0);
     expect(phaseMsForDisplay(r, 'f2l_2')).toBe(0);
-    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(8000);
-    expect(phaseMsForDisplay(r, 'f2l_4')).toBe(0);
+    expect(phaseMsForDisplay(r, 'f2l_3')).toBe(0);
+    expect(phaseMsForDisplay(r, 'f2l_4')).toBe(8000);
   });
 
   it('4 splits → 4 non-zero sub-bands whose sum equals f2l ms', () => {

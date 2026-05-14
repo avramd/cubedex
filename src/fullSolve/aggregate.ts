@@ -20,9 +20,10 @@ export const PHASE_KEY_LABELS: Record<string, string> = {
 export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
   const p = r.phases || {};
   // F2L sub-band keys: split p.f2l into 4 buckets using r.f2lSplits. Pre-
-  // feature records (no f2lSplits) fold the whole F2L into f2l_3 to keep
-  // the band at the same alpha (0.6) as the legacy single F2L band; the
-  // other sub-bands return 0 (invisible).
+  // feature records (no f2lSplits) fold the whole F2L into f2l_4 so the
+  // band renders at the topmost (darkest) sub-band's saturation, matching
+  // the visual prominence of the original single F2L band; the other
+  // sub-bands return 0 (invisible).
   if (displayKey === 'f2l_1' || displayKey === 'f2l_2'
       || displayKey === 'f2l_3' || displayKey === 'f2l_4') {
     return f2lSubBandMs(r, displayKey);
@@ -43,9 +44,10 @@ function f2lSubBandMs(r: SolveRecord, k: 'f2l_1' | 'f2l_2' | 'f2l_3' | 'f2l_4'):
   const f2lMs = p.f2l ?? 0;
   const splits = r.f2lSplits;
   if (!splits || splits.length === 0) {
-    // Legacy record. Fold the whole F2L into sub-band 3 so the band
-    // renders at alpha 0.6 (matching the original single-band look).
-    return k === 'f2l_3' ? f2lMs : 0;
+    // Legacy record. Fold the whole F2L into sub-band 4 so the band
+    // renders at the topmost (darkest) saturation — visually prominent
+    // and clearly distinct from a partial split.
+    return k === 'f2l_4' ? f2lMs : 0;
   }
   const crossMs = p.cross ?? 0;
   // splits[i] is ms-from-solveStart at slot count (i+1). Convert to
