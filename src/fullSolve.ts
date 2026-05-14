@@ -1740,8 +1740,12 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
   closeBtn.focus();
 
   // Build phase-band x-extents (in seconds) from r.phases in canonical
-  // order. Falls back to no bands if r.phases is empty.
+  // order. Falls back to no bands if r.phases is empty. When the F2L
+  // splits toggle is on and the record has f2lSplits, the F2L band is
+  // subdivided into up to 4 alpha-scaled sub-bands matching the main
+  // graph's visual decomposition.
   const order = phaseOrderForRecord(r);
+  const splitF2l = prefs.f2lSplits && Array.isArray(r.f2lSplits) && r.f2lSplits.length > 0;
   let acc = 0;
   const bands: { start: number; end: number; color: string }[] = [];
   for (const key of order) {
@@ -1750,8 +1754,32 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
     const start = acc / 1000;
     acc += ms;
     const end = acc / 1000;
-    const color = PHASE_COLOR_BY_KEY[key] ?? PHASE_COLORS[0];
-    bands.push({ start, end, color });
+    if (key === 'f2l' && splitF2l) {
+      // Sub-band boundaries inside the F2L window, in seconds.
+      // splits[i] is ms-from-solve-start at slot count i+1. Clamp into
+      // the F2L window and enforce monotonicity.
+      const splits = r.f2lSplits!;
+      const f2lStartSec = start;
+      const f2lEndSec = end;
+      const bounds: number[] = [f2lStartSec];
+      for (let i = 0; i < 4; i++) {
+        const tSec = i < splits.length ? splits[i] / 1000 : f2lEndSec;
+        const clamped = Math.max(bounds[bounds.length - 1], Math.min(tSec, f2lEndSec));
+        bounds.push(clamped);
+      }
+      bounds[bounds.length - 1] = f2lEndSec; // pin the last bound
+      const ALPHAS = [0.30, 0.45, 0.60, 0.75];
+      for (let i = 0; i < 4; i++) {
+        const s = bounds[i];
+        const e = bounds[i + 1];
+        if (e <= s) continue; // skip 0-width sub-bands
+        const color = PHASE_COLORS[1].replace(/,\s*[\d.]+\)\s*$/, `, ${ALPHAS[i]})`);
+        bands.push({ start: s, end: e, color });
+      }
+    } else {
+      const color = PHASE_COLOR_BY_KEY[key] ?? PHASE_COLORS[0];
+      bands.push({ start, end, color });
+    }
   }
 
   const isDark = document.documentElement.classList.contains('dark');
