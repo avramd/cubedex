@@ -114,8 +114,8 @@ For at least one row in the list:
 
 ## Graph range slider
 
-- [ ] Slider min is 20, max is 500, default 20. Drag to a higher value → graph extends back through history; if history is shorter than the value, all of history is shown.
-- [ ] With < 20 solves recorded, slider sits at 20 but graph shows only what exists.
+- [ ] Slider min is 10, max is 500, default 20. Drag to a higher value → graph extends back through history; if history is shorter than the value, all of history is shown.
+- [ ] With < 10 solves recorded, slider sits at 10 but graph shows only what exists.
 
 ## PWA refresh prompt (production-build only)
 

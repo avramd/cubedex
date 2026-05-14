@@ -2140,12 +2140,12 @@ function applyPrefsToUI() {
   const pl = fsTwoLookPllEl(); if (pl) pl.checked = prefs.twoLookPll;
   // Slider range is fixed: 20 (min) to 500 (HISTORY_CAP). When history is
   // shorter than the chosen range, renderGraph() clamps to history.length.
-  if (prefs.graphRange < 20 || prefs.graphRange > 500) {
-    prefs.graphRange = Math.max(20, Math.min(500, prefs.graphRange));
+  if (prefs.graphRange < 10 || prefs.graphRange > 500) {
+    prefs.graphRange = Math.max(10, Math.min(500, prefs.graphRange));
     savePrefs();
   }
   const gr = fsGraphRangeEl(); if (gr) {
-    gr.min = '20';
+    gr.min = '10';
     gr.max = '500';
     gr.value = String(prefs.graphRange);
   }
