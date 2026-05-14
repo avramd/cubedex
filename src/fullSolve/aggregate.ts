@@ -29,8 +29,18 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
     return f2lSubBandMs(r, displayKey);
   }
   switch (displayKey) {
-    case 'oll':  return (p.oll  ?? 0) + (p.eoll ?? 0) + (p.ocll ?? 0);
-    case 'pll':  return (p.pll  ?? 0) + (p.cpll ?? 0) + (p.epll ?? 0);
+    // Aggregate OLL prefers the split (eoll + ocll) when present; falls
+    // back to the unsplit `oll` field. Same for PLL. This lets the backfill
+    // freely add split keys to records that already have the aggregate
+    // without double-counting.
+    case 'oll':  {
+      const split = (p.eoll ?? 0) + (p.ocll ?? 0);
+      return split > 0 ? split : (p.oll ?? 0);
+    }
+    case 'pll':  {
+      const split = (p.cpll ?? 0) + (p.epll ?? 0);
+      return split > 0 ? split : (p.pll ?? 0);
+    }
     case 'ocll': return (p.ocll ?? p.oll ?? 0);
     case 'eoll': return (p.eoll ?? 0);
     case 'epll': return (p.epll ?? p.pll ?? 0);

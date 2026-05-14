@@ -38,8 +38,14 @@ describe('phaseMsForDisplay — 2-look toggled OFF (aggregate keys)', () => {
     expect(phaseMsForDisplay(rec({ eoll: 600, ocll: 1200 }), 'oll')).toBe(1800);
   });
 
-  it('OLL = oll + eoll + ocll if a record somehow has all three', () => {
-    expect(phaseMsForDisplay(rec({ oll: 100, eoll: 200, ocll: 300 }), 'oll')).toBe(600);
+  it('OLL prefers the split (eoll + ocll) when present, ignoring the aggregate `oll`', () => {
+    // Backfill adds eoll/ocll to records that already have oll. We must
+    // NOT double-count by summing all three — prefer the split.
+    expect(phaseMsForDisplay(rec({ oll: 1500, eoll: 200, ocll: 1300 }), 'oll')).toBe(1500);
+  });
+
+  it('PLL prefers the split (cpll + epll) when present, ignoring the aggregate `pll`', () => {
+    expect(phaseMsForDisplay(rec({ pll: 800, cpll: 300, epll: 500 }), 'pll')).toBe(800);
   });
 
   it('PLL = pll on a 2-look-off record', () => {

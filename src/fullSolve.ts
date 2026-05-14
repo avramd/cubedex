@@ -137,17 +137,26 @@ function mergeImportedHistory(incoming: any[]): { added: number; replaced: numbe
   return { added, replaced, skipped };
 }
 
-// ---------- F2L splits backfill ----------
-// For records that have `turns` but no `f2lSplits` — i.e. solves recorded
-// after the turn-timestamp feature but before slot tracking — we can
-// re-derive splits by replaying scramble + solution and watching the slot
-// count progression. Mid-half-turn intermediate state is approximated:
-// the COLLAPSED solution is applied directly (R2 in one shot, not R + R),
-// so a slot that would have completed exactly between the two physical
-// quarter-turns of a pair gets attributed to the second one (≤ ~200ms
-// timing error in practice, acceptable for visualisation).
+// ---------- Replay-based backfill ----------
+// For records that have `turns` (per-physical-move timestamps) but lack
+// derived data — F2L slot splits, or 2-look OLL/PLL splits — we can
+// replay scramble + solution onto a solved cube, watch cube state, and
+// re-derive the missing fields. Mid-half-turn intermediate state is
+// approximated: the COLLAPSED solution is applied directly (R2 in one
+// shot, not R + R), so a state transition that would have completed
+// between the two physical quarter-turns of a pair gets attributed to
+// the second one (≤ ~200ms timing error in practice, acceptable for
+// visualisation).
 
-function recomputeF2lSplitsFor(r: SolveRecord): number[] | null {
+interface ReplayDerived {
+  f2lSplits?: number[];
+  // ms durations (not absolute timestamps). Cumulatively: cross_ms +
+  // f2l_ms + eoll + ocll + cpll + epll === totalMs (approximately).
+  twoLookOll?: { eoll: number; ocll: number };
+  twoLookPll?: { cpll: number; epll: number };
+}
+
+function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   if (!kpuzzle) return null;
   if (r.process === 'beginner') return null;
   if (!r.turns || r.turns.length === 0) return null;
@@ -159,11 +168,14 @@ function recomputeF2lSplitsFor(r: SolveRecord): number[] | null {
   let physicalIdx = 0; // index into r.turns of the most-recent physical event
   let crossFace: Face | null = null;
   let slotsEver = 0;
-  const splits: number[] = [];
+  const f2lSplits: number[] = [];
+  // Absolute ms-from-solve-start at first detection of each LL phase.
+  let eollAt: number | null = null;
+  let ocllAt: number | null = null;
+  let cpllAt: number | null = null;
+  let epllAt: number | null = null;
   for (const t of tokens) {
     try { p = p.applyMove(t); } catch { return null; }
-    // A half-turn token corresponds to 2 physical events; advance the
-    // timestamp pointer accordingly.
     physicalIdx += t.endsWith('2') ? 2 : 1;
     let facelets: string;
     try { facelets = patternToFacelets(p); } catch { continue; }
@@ -173,30 +185,79 @@ function recomputeF2lSplitsFor(r: SolveRecord): number[] | null {
       }
       if (!crossFace) continue;
     }
-    if (slotsEver >= 4) continue;
-    const slots = f2lSlotsDoneOn(crossFace, facelets);
-    while (slots > slotsEver) {
-      slotsEver++;
-      const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
-      const seconds = r.turns[tIdx] ?? 0;
-      splits.push(Math.round(seconds * 1000));
+    const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
+    const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
+    if (slotsEver < 4) {
+      const slots = f2lSlotsDoneOn(crossFace, facelets);
+      while (slots > slotsEver) {
+        slotsEver++;
+        f2lSplits.push(tMs);
+      }
+    }
+    // 2-look OLL transitions. Lock on FIRST observation (monotonic) —
+    // matches the real-time phase detection behaviour.
+    if (eollAt === null && isEOLLDoneOn(crossFace, facelets)) eollAt = tMs;
+    if (ocllAt === null && isOllDoneOn(crossFace, facelets)) {
+      ocllAt = tMs;
+      if (eollAt === null) eollAt = tMs; // full OLL implies EOLL
+    }
+    // 2-look PLL transitions. Require OLL already detected so we don't
+    // mis-fire from an earlier accidental matching state.
+    if (ocllAt !== null && cpllAt === null && isHeadlightsDoneOn(crossFace, facelets) && isOllDoneOn(crossFace, facelets)) {
+      cpllAt = tMs;
+    }
+    if (epllAt === null && isSolved(facelets)) {
+      epllAt = tMs;
+      if (cpllAt === null) cpllAt = tMs; // solved implies headlights
     }
   }
-  return splits.length > 0 ? splits : null;
+  const out: ReplayDerived = {};
+  if (f2lSplits.length > 0) out.f2lSplits = f2lSplits;
+  if (eollAt !== null && ocllAt !== null) {
+    // f2l-done ms-from-solveStart = cross_ms + f2l_ms (stored).
+    const f2lDoneMs = (r.phases?.cross ?? 0) + (r.phases?.f2l ?? 0);
+    out.twoLookOll = {
+      eoll: Math.max(0, eollAt - f2lDoneMs),
+      ocll: Math.max(0, ocllAt - eollAt),
+    };
+  }
+  if (cpllAt !== null && epllAt !== null && ocllAt !== null) {
+    out.twoLookPll = {
+      cpll: Math.max(0, cpllAt - ocllAt),
+      epll: Math.max(0, epllAt - cpllAt),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function backfillF2lSplits() {
   if (!kpuzzle) return;
   let updated = 0;
   for (const r of history) {
-    if (r.f2lSplits) continue;
     if (!r.turns || r.turns.length === 0) continue;
     if (r.process === 'beginner') continue;
-    const splits = recomputeF2lSplitsFor(r);
-    if (splits && splits.length > 0) {
-      r.f2lSplits = splits;
-      updated++;
+    const hasF2l = !!r.f2lSplits;
+    const hasOllSplit = typeof r.phases?.eoll === 'number' && typeof r.phases?.ocll === 'number';
+    const hasPllSplit = typeof r.phases?.cpll === 'number' && typeof r.phases?.epll === 'number';
+    if (hasF2l && hasOllSplit && hasPllSplit) continue;
+    const derived = recomputeMissingSplitsFor(r);
+    if (!derived) continue;
+    let touched = false;
+    if (!hasF2l && derived.f2lSplits) {
+      r.f2lSplits = derived.f2lSplits;
+      touched = true;
     }
+    if (!hasOllSplit && derived.twoLookOll) {
+      r.phases.eoll = derived.twoLookOll.eoll;
+      r.phases.ocll = derived.twoLookOll.ocll;
+      touched = true;
+    }
+    if (!hasPllSplit && derived.twoLookPll) {
+      r.phases.cpll = derived.twoLookPll.cpll;
+      r.phases.epll = derived.twoLookPll.epll;
+      touched = true;
+    }
+    if (touched) updated++;
   }
   if (updated > 0) {
     saveHistory();
@@ -1141,14 +1202,22 @@ function renderGraph() {
   });
 
   const totals = slice.map(r => r.totalMs / 1000);
+  // Ao5/Ao12 are computed over ALL history, then tail-sliced to the
+  // visible window. Otherwise the first few entries in the window can't
+  // form a complete window of size N and the trendline would flat-line
+  // at null even when prior data exists to compute it from.
+  const allTotals = history.map(r => r.totalMs / 1000);
+  const tailOf = (arr: (number | null)[]) => arr.slice(-slice.length);
+  const ao5Series = prefs.graphAo5 ? tailOf(rollingAverage(allTotals, 5)) : null;
+  const ao12Series = prefs.graphAo12 ? tailOf(rollingAverage(allTotals, 12)) : null;
   const isDark = document.documentElement.classList.contains('dark');
   const ao5Color = isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)';
   const ao12Color = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
-  if (prefs.graphAo5) {
+  if (ao5Series) {
     datasets.push({
       type: 'line' as const,
       label: 'Ao5',
-      data: rollingAverage(totals, 5),
+      data: ao5Series,
       borderColor: ao5Color,
       backgroundColor: 'transparent',
       borderDash: [4, 4],
@@ -1161,11 +1230,11 @@ function renderGraph() {
       clip: false,
     });
   }
-  if (prefs.graphAo12) {
+  if (ao12Series) {
     datasets.push({
       type: 'line' as const,
       label: 'Ao12',
-      data: rollingAverage(totals, 12),
+      data: ao12Series,
       borderColor: ao12Color,
       backgroundColor: 'transparent',
       borderDash: [2, 2],
