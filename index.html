@@ -403,10 +403,6 @@
               <input type="checkbox" id="fs-graph-ao12" checked class="form-checkbox h-4 w-4 text-blue-600" />
               <span>Ao12</span>
             </label>
-            <label class="flex items-center gap-1" title="Split each F2L band into sub-bands by slot-count milestones.">
-              <input type="checkbox" id="fs-graph-f2l-splits" class="form-checkbox h-4 w-4 text-blue-600" />
-              <span>F2L slots</span>
-            </label>
           </div>
           <label for="full-solve-toggle" class="ml-auto relative inline-flex items-center cursor-pointer">
             <input type="checkbox" id="full-solve-toggle" class="sr-only" />
@@ -527,19 +523,21 @@
                   <option value="pause">Pause</option>
                 </select>
               </div>
-              <div id="fs-cfop-options" class="flex flex-wrap gap-4 items-center">
-                <label for="fs-twolook-oll-toggle" class="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" id="fs-twolook-oll-toggle" class="sr-only" />
-                  <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
-                  <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
-                  <span class="ml-2 text-gray-900 dark:text-white">2-look OLL</span>
+              <div id="fs-cfop-options" class="hidden flex-col gap-1 justify-end text-xs sm:text-sm">
+                <label class="flex items-center gap-2" title="Split each F2L band into sub-bands by slot-count milestones.">
+                  <input type="checkbox" id="fs-graph-f2l-splits" class="form-checkbox h-4 w-4 text-blue-600" />
+                  <span>F2L slots</span>
                 </label>
-                <label for="fs-twolook-pll-toggle" class="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" id="fs-twolook-pll-toggle" class="sr-only" />
-                  <div class="w-11 h-6 bg-gray-200 rounded-full shadow-inner"></div>
-                  <div class="dot absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 ease-in-out"></div>
-                  <span class="ml-2 text-gray-900 dark:text-white">2-look PLL</span>
-                </label>
+                <div class="flex flex-wrap gap-3">
+                  <label class="flex items-center gap-2">
+                    <input type="checkbox" id="fs-twolook-oll-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>2-look OLL</span>
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <input type="checkbox" id="fs-twolook-pll-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>2-look PLL</span>
+                  </label>
+                </div>
               </div>
               <div class="ml-auto flex items-center gap-3">
                 <div id="fs-timer" class="text-2xl sm:text-3xl font-mono tabular-nums">0.00</div>
