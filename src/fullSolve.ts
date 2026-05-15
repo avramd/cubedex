@@ -511,6 +511,22 @@ let f2lSlotsEverDone = 0;
 // Graph
 let graphChart: Chart | null = null;
 
+// Click-to-focus on a phase group in the main history graph. null = no
+// focus (full stack visible). Set by a click within a phase band; cleared
+// by a click outside the focused band (or on the cross / empty space).
+let focusedPhaseGroup: 'f2l' | 'll' | null = null;
+
+const F2L_KEYS = new Set(['f2l', 'f2l_1', 'f2l_2', 'f2l_3', 'f2l_4']);
+const LL_KEYS  = new Set(['oll', 'pll', 'eoll', 'ocll', 'cpll', 'epll', 'll']);
+
+function groupOfKey(k: string): 'cross' | 'f2l' | 'll' | null {
+  if (k === 'cross' || k === 'setup') return 'cross';
+  if (F2L_KEYS.has(k)) return 'f2l';
+  if (LL_KEYS.has(k))  return 'll';
+  return null;
+}
+
+
 // ---------- Scramble precompute ----------
 
 // Generate a random-move 3x3 scramble locally (no Web Worker). Chooses
@@ -1163,6 +1179,19 @@ function renderGraph() {
       ];
     }
   }
+  // Phase-focus: when set, the graph hides every band outside the focused
+  // group (F2L or LL) and re-baselines the remaining bands from zero, so
+  // the user can inspect just that phase's variation without the rest of
+  // the stack visually compressing it.
+  if (focusedPhaseGroup) {
+    keyOrder = keyOrder.filter(k => groupOfKey(k) === focusedPhaseGroup);
+    if (keyOrder.length === 0) {
+      // Focus group has no representative keys for this configuration —
+      // bail back to the unfocused view.
+      focusedPhaseGroup = null;
+      keyOrder = displaySeq.map(p => p.key);
+    }
+  }
   const labels = slice.map((_, i) => `${history.length - slice.length + i + 1}`);
 
   // Alpha-scaled green for F2L sub-bands. Legacy records (no f2lSplits)
@@ -1181,7 +1210,17 @@ function renderGraph() {
     return def?.color ?? PHASE_COLORS[0];
   };
   const labelForKey = (k: string): string => {
-    if (k.startsWith('f2l_')) return 'F2L';
+    if (k.startsWith('f2l_')) {
+      // When the user has focused on F2L, the 4 sub-bands get individual
+      // "1P/2P/3P/4P" chit labels (one per pair slot reached). Otherwise
+      // the inline-label pass collapses them into a single "F2L" chit at
+      // the topmost sub-band — so the dataset label stays "F2L".
+      if (focusedPhaseGroup === 'f2l') {
+        const n = parseInt(k.slice(4), 10);
+        return `${n}P`;
+      }
+      return 'F2L';
+    }
     return PHASE_KEY_LABELS[k] ?? k;
   };
 
@@ -1219,12 +1258,21 @@ function renderGraph() {
     };
   });
 
-  const totals = slice.map(r => r.totalMs / 1000);
+  // When focused, "totals" become the sum of just the focused-group phase
+  // ms, so the Y-axis cap (1σ/2σ) and AoX trendlines scale to the focused
+  // bands instead of the whole solve.
+  const recordTotalSec = (r: SolveRecord): number => {
+    if (!focusedPhaseGroup) return r.totalMs / 1000;
+    let sum = 0;
+    for (const k of keyOrder) sum += phaseMsForDisplay(r, k);
+    return sum / 1000;
+  };
+  const totals = slice.map(recordTotalSec);
   // Ao5/Ao12 are computed over ALL history, then tail-sliced to the
   // visible window. Otherwise the first few entries in the window can't
   // form a complete window of size N and the trendline would flat-line
   // at null even when prior data exists to compute it from.
-  const allTotals = history.map(r => r.totalMs / 1000);
+  const allTotals = history.map(recordTotalSec);
   const tailOf = (arr: (number | null)[]) => arr.slice(-slice.length);
   const ao5Series = prefs.graphAo5 ? tailOf(rollingAverage(allTotals, 5)) : null;
   const ao12Series = prefs.graphAo12 ? tailOf(rollingAverage(allTotals, 12)) : null;
@@ -1357,12 +1405,16 @@ function renderGraph() {
           const r = slice[idx];
           const k = keyOrder[dsIdx];
           if (!r || !k) return;
-          // F2L sub-band collapse: render exactly one F2L label per solve,
-          // at the topmost sub-band (f2l_4)'s point, summing the per-solve
-          // F2L total. The lower sub-bands skip rendering. This keeps the
-          // hover chit list at a constant length regardless of the toggle.
-          if (k.startsWith('f2l_') && k !== 'f2l_4') return;
-          const ms = k === 'f2l_4'
+          // In F2L focus, emit a chit per sub-band (labelled 1P/2P/3P/4P
+          // via labelForKey); the F2L total is added separately as a
+          // chit-less entry. In any other view, collapse the 4 sub-bands
+          // into one "F2L" chit at the topmost sub-band's point and skip
+          // the lone 'f2l' chit entirely when focused (the chit-less
+          // total covers it).
+          const collapseF2lSubBands = focusedPhaseGroup !== 'f2l';
+          if (collapseF2lSubBands && k.startsWith('f2l_') && k !== 'f2l_4') return;
+          if (focusedPhaseGroup === 'f2l' && k === 'f2l') return;
+          const ms = (collapseF2lSubBands && k === 'f2l_4')
             ? phaseMsForDisplay(r, 'f2l')
             : phaseMsForDisplay(r, k);
           if (ms <= 0) return; // skip 0-duration phases
@@ -1386,18 +1438,38 @@ function renderGraph() {
         });
       });
 
-      // Synthetic "Solve" entry — no color chit, anchored just above the
-      // topmost cumulative point (the total of all phases for this solve).
+      // Synthetic total-time entry — no color chit, anchored just above
+      // the topmost cumulative point. Its meaning depends on focus:
+      //   - Unfocused: "Solve TT.tt" = full solve time.
+      //   - F2L-focused: "F2L TT.tt" = sum of the visible F2L bands
+      //     (alongside per-pair 1P/2P/3P/4P chits below).
+      //   - LL-focused: "LL TT.tt" = sum of the visible LL bands.
       const r = slice[idx];
       if (r && Number.isFinite(topY)) {
-        const text = `Solve ${formatSec(r.totalMs / 1000)}`;
+        let totalLabel: string;
+        let totalSec: number;
+        if (focusedPhaseGroup === 'f2l') {
+          totalLabel = 'F2L';
+          let sumMs = 0;
+          for (const k of keyOrder) sumMs += phaseMsForDisplay(r, k);
+          totalSec = sumMs / 1000;
+        } else if (focusedPhaseGroup === 'll') {
+          totalLabel = 'LL';
+          let sumMs = 0;
+          for (const k of keyOrder) sumMs += phaseMsForDisplay(r, k);
+          totalSec = sumMs / 1000;
+        } else {
+          totalLabel = 'Solve';
+          totalSec = r.totalMs / 1000;
+        }
+        const text = `${totalLabel} ${formatSec(totalSec)}`;
         entries.push({
           text,
           color: '',
           isTrendline: false,
           noChit: true,
           // Place 1 px above the topmost phase so the de-overlap algorithm
-          // sorts Solve to the top of the stack.
+          // sorts the total to the top of the stack.
           point: { x: topX, y: topY - 1 },
           textW: c2d.measureText(text).width,
         });
@@ -1541,6 +1613,44 @@ function renderGraph() {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       events: ['mousemove', 'mouseout', 'click', 'touchstart', 'touchmove'],
+      onClick: (e, _elements, chart) => {
+        // Map the click to a phase group via cumulative heights at the
+        // clicked column. Clicking on a F2L or LL band TOGGLES that focus
+        // (so the same band is the on-switch AND the off-switch). Clicks
+        // on cross / above the stack / outside the plot area also clear.
+        const ca = chart.chartArea;
+        const ex = (e as any)?.x;
+        const ey = (e as any)?.y;
+        const hasXY = typeof ex === 'number' && typeof ey === 'number';
+        const inAxes = hasXY &&
+          ex >= ca.left && ex <= ca.right && ey >= ca.top && ey <= ca.bottom;
+        let clickedGroup: 'f2l' | 'll' | null = null;
+        if (inAxes) {
+          const xScale: any = chart.scales.x;
+          const yScale: any = chart.scales.y;
+          const rawX = xScale?.getValueForPixel?.(ex);
+          const yValueSec = yScale?.getValueForPixel?.(ey);
+          if (typeof rawX === 'number' && typeof yValueSec === 'number') {
+            const colIdx = Math.max(0, Math.min(slice.length - 1, Math.round(rawX)));
+            const colCum = cumulative[colIdx];
+            let hitKey: string | null = null;
+            for (let i = 0; i < colCum.length; i++) {
+              if (yValueSec <= colCum[i]) { hitKey = keyOrder[i]; break; }
+            }
+            const grp = hitKey ? groupOfKey(hitKey) : null;
+            if (grp === 'f2l' || grp === 'll') clickedGroup = grp;
+          }
+        }
+        // Toggle if clicking the currently-focused group; otherwise set
+        // to the new group (or clear if click landed outside).
+        const next: typeof focusedPhaseGroup = clickedGroup === focusedPhaseGroup
+          ? null
+          : clickedGroup;
+        if (focusedPhaseGroup !== next) {
+          focusedPhaseGroup = next;
+          renderGraph();
+        }
+      },
       onHover: (e, elements, chart) => {
         // Two-stage hover: full chit + aggregate labels when the cursor is
         // inside the plot axes; aggregate-only when the cursor is inside the
@@ -1578,6 +1688,35 @@ function renderGraph() {
           ch.$inAxes = inAxes;
           chart.draw();
         }
+
+        // Focus-hover: when the cursor is over a F2L or LL band (inside
+        // the plot area), switch the cursor to `pointer` and show a
+        // delayed "Focus on …" / "Focus out" label near the pointer.
+        // Chart.js fires onHover with type === 'mouseout' when the cursor
+        // leaves the canvas — treat that as "left the focus area".
+        const cv = (chart.canvas as HTMLCanvasElement | undefined);
+        const isLeave = (e as any)?.type === 'mouseout';
+        if (isLeave || !inAxes) {
+          if (cv) cv.style.cursor = '';
+        } else {
+          // Same band-detection logic as the click handler.
+          let hoverGroup: 'f2l' | 'll' | null = null;
+          const xScale: any = chart.scales.x;
+          const yScale: any = chart.scales.y;
+          const rawX = xScale?.getValueForPixel?.(ex);
+          const yValueSec = yScale?.getValueForPixel?.(ey);
+          if (typeof rawX === 'number' && typeof yValueSec === 'number') {
+            const colIdx = Math.max(0, Math.min(slice.length - 1, Math.round(rawX)));
+            const colCum = cumulative[colIdx];
+            let hitKey: string | null = null;
+            for (let i = 0; i < colCum.length; i++) {
+              if (yValueSec <= colCum[i]) { hitKey = keyOrder[i]; break; }
+            }
+            const grp = hitKey ? groupOfKey(hitKey) : null;
+            if (grp === 'f2l' || grp === 'll') hoverGroup = grp;
+          }
+          if (cv) cv.style.cursor = hoverGroup ? 'pointer' : '';
+        }
       },
       // Suppress the chart-internal legend (we render our own) and the
       // built-in tooltip block (replaced by the inline-label plugin).
@@ -1606,6 +1745,9 @@ function renderGraph() {
       ch.$inAxes = false;
       graphChart.draw();
     }
+    // Also reset the focus-hover cursor when the pointer leaves the
+    // stats area entirely.
+    if (graphChart.canvas) (graphChart.canvas as HTMLCanvasElement).style.cursor = '';
   };
   const algStatsEl = document.getElementById('alg-stats');
   if (algStatsEl) {
@@ -1618,6 +1760,12 @@ function renderGraph() {
       const xScale: any = graphChart.scales.x;
       const labels: any[] = (graphChart.data.labels as any[]) ?? [];
       if (!labels.length) return;
+      // If the cursor wandered off the canvas (into the metric boxes or
+      // padding within #alg-stats), drop the focus-cursor affordance.
+      const offCanvas = cx < 0 || cx > rect.width || cy < 0 || cy > rect.height;
+      if (offCanvas && graphChart.canvas) {
+        (graphChart.canvas as HTMLCanvasElement).style.cursor = '';
+      }
       const inAxes = cx >= ca.left && cx <= ca.right && cy >= ca.top && cy <= ca.bottom;
       const raw = xScale?.getValueForPixel?.(cx);
       const ch = graphChart as any;
