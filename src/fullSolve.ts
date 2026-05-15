@@ -526,6 +526,61 @@ function groupOfKey(k: string): 'cross' | 'f2l' | 'll' | null {
   return null;
 }
 
+// Cumulative ms-from-solve-start at the moment the given display phase
+// would have BEGUN (assuming the canonical ordering Cross → F2L (slot
+// 1..4) → EOLL → OCLL → CPLL → EPLL). Used by the idle-shading plugin to
+// figure out how long after a phase started the user actually made their
+// first turn during it.
+function phaseStartMsFor(r: SolveRecord, key: string): number {
+  const p = r.phases || {};
+  const crossMs = p.cross ?? 0;
+  const f2lMs   = p.f2l   ?? 0;
+  switch (key) {
+    case 'cross':
+    case 'setup': return 0;
+    case 'f2l':
+    case 'f2l_1': return crossMs;
+    case 'f2l_2': return r.f2lSplits?.[0] ?? crossMs;
+    case 'f2l_3': return r.f2lSplits?.[1] ?? crossMs;
+    case 'f2l_4': return r.f2lSplits?.[2] ?? crossMs;
+    case 'oll':
+    case 'eoll':
+    case 'll':
+      return crossMs + f2lMs;
+    case 'ocll':
+      return crossMs + f2lMs + (p.eoll ?? 0);
+    case 'cpll':
+    case 'pll': {
+      const ollSplit = (p.eoll ?? 0) + (p.ocll ?? 0);
+      const ollUsed  = ollSplit > 0 ? ollSplit : (p.oll ?? 0);
+      return crossMs + f2lMs + ollUsed;
+    }
+    case 'epll': {
+      const ollSplit = (p.eoll ?? 0) + (p.ocll ?? 0);
+      const ollUsed  = ollSplit > 0 ? ollSplit : (p.oll ?? 0);
+      return crossMs + f2lMs + ollUsed + (p.cpll ?? 0);
+    }
+    default: return 0;
+  }
+}
+
+// Idle (think-time) ms at the start of the given phase: how long after
+// the phase began before the user's first physical turn during it. Zero
+// if no turn data is recorded (legacy records) or if the first turn
+// happened at-or-before the phase start.
+function phaseIdleMsFor(r: SolveRecord, key: string): number {
+  const turns = r.turns;
+  if (!turns || turns.length === 0) return 0;
+  const startMs = phaseStartMsFor(r, key);
+  let firstAfter: number | null = null;
+  for (const t of turns) {
+    const ms = t * 1000;
+    if (ms > startMs) { firstAfter = ms; break; }
+  }
+  if (firstAfter === null) return 0;
+  return Math.max(0, firstAfter - startMs);
+}
+
 
 // ---------- Scramble precompute ----------
 
@@ -1353,6 +1408,64 @@ function renderGraph() {
   const labelTextColor = isDarkNow ? '#ffffff' : '#111827';
   const pillBg = isDarkNow ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.92)';
 
+  // Plugin: shade the initial idle period of each visible phase. The
+  // shaded area is a continuous polygon between two lines, one solve to
+  // the next: the bottom edge follows the end of the previous phase
+  // (i.e. the band's lower boundary) and the top edge follows that line
+  // raised by the idle ms (the gap before the first turn of the phase).
+  // Only renders in focus views — F2L or LL — where the rebaseline-from-
+  // zero view makes the idle stripe legible.
+  const idleShadingPlugin = {
+    id: 'idleShading',
+    afterDatasetsDraw(chart: any) {
+      if (!focusedPhaseGroup) return;
+      if (slice.length === 0) return;
+      const xScale = chart.scales.x;
+      const yScale = chart.scales.y;
+      const ctx: CanvasRenderingContext2D = chart.ctx;
+      const xs = slice.map((_, i) => xScale.getPixelForValue(i));
+      const isDark = document.documentElement.classList.contains('dark');
+      ctx.save();
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.20)' : 'rgba(0,0,0,0.20)';
+      // Track the "previous phase top" line as we walk keyOrder; for the
+      // first key it's just 0 (chart origin).
+      let prevValuesSec: number[] = slice.map(() => 0);
+      for (let i = 0; i < keyOrder.length; i++) {
+        const key = keyOrder[i];
+        const currentValuesSec = slice.map((_, col) => cumulative[col][i]);
+        const idleTopsSec = slice.map((r, col) => {
+          const phaseSec = currentValuesSec[col] - prevValuesSec[col];
+          if (phaseSec <= 0) return prevValuesSec[col];
+          const idleMs = phaseIdleMsFor(r, key);
+          const idleSec = Math.min(idleMs / 1000, phaseSec);
+          return prevValuesSec[col] + idleSec;
+        });
+        const anyIdle = idleTopsSec.some((v, col) => v > prevValuesSec[col]);
+        if (anyIdle) {
+          ctx.beginPath();
+          // Left-to-right along the bottom edge (previous phase top).
+          for (let col = 0; col < slice.length; col++) {
+            const x = xs[col];
+            const y = yScale.getPixelForValue(prevValuesSec[col]);
+            if (col === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          // Right-to-left along the top edge (first-turn line). Columns
+          // with zero idle naturally collapse the polygon onto its
+          // bottom edge there, so the shaded region tapers correctly.
+          for (let col = slice.length - 1; col >= 0; col--) {
+            const x = xs[col];
+            const y = yScale.getPixelForValue(idleTopsSec[col]);
+            ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fill();
+        }
+        prevValuesSec = currentValuesSec;
+      }
+      ctx.restore();
+    },
+  };
+
   // Custom plugin: on hover, draw per-phase split times at each line's data
   // point — vertically de-overlapped, edge-flipped to stay inside the chart,
   // and prefixed with a legend-style color chit.
@@ -1606,7 +1719,7 @@ function renderGraph() {
   graphChart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets },
-    plugins: [inlineSplitLabels],
+    plugins: [idleShadingPlugin, inlineSplitLabels],
     options: {
       responsive: true,
       animation: false,
