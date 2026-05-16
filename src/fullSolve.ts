@@ -22,7 +22,13 @@ Chart.register(...registerables);
 // ---------- Types ----------
 
 export type { Process } from './fullSolve/types';
-export type Inspection = '3' | '5' | '10' | '15' | 'pause';
+// Inspection options. 'none' is a special "untimed" mode: the timer
+// never runs and the completed solve is NOT recorded into history. It's
+// for casual practice (or when you just want to follow a shared scramble
+// without it counting). Treated like 'pause' for the scramble→inspection
+// transition (no auto-countdown), but the first move no longer kicks off
+// any timing/recording machinery.
+export type Inspection = '3' | '5' | '10' | '15' | 'pause' | 'none';
 
 interface FullSolvePrefs {
   enabled: boolean;
@@ -469,6 +475,18 @@ let mode: Mode = 'idle';
 let cubeConnected = false;
 let cubeIsSolved = false;
 let pendingScramble: string | null = null;  // set by 🎯 install-as-next
+// "Share scrambles" peer state. Set by index.ts via setShareScramblesState.
+// `sharingScrambles` = this peer is broadcasting. `peerSharingScrambles` =
+// the partner is broadcasting (so our switch is greyed out). `onLocalScrambleChange`
+// fires when we change scramble locally (not via remote); index.ts uses it
+// to broadcast the new scramble when we're the sharer. When `applyingRemoteScramble`
+// is true the next newScramble() suppresses the local-change callback to avoid
+// echoing the change back.
+let sharingScrambles = false;
+let peerSharingScrambles = false;
+let applyingRemoteScramble = false;
+let onLocalScrambleChange: ((scramble: string) => void) | null = null;
+let onShareStateChange: ((sharing: boolean) => void) | null = null;
 // Set of solve-record timestamps whose solutions the user has revealed
 // (default: every solve's solution is hidden until they click 👀). Keyed
 // by `ts` rather than array index so deletions don't shift state.
@@ -637,6 +655,7 @@ function applyFullSolveMode() {
   if (toggle) toggle.checked = enabled;
   // Banner state depends on enabled+connected and must update either way.
   updateCubeGate();
+  updateShareScramblesUi();
   if (enabled) {
     updateCfopOptionsVisibility();
     // Reuse training mode's #alg-stats area: big graph + 3 stat boxes.
@@ -839,6 +858,12 @@ function invertMove(m: string): string {
 function renderTimer() {
   const el = fsTimerEl();
   if (!el) return;
+  // Untimed practice: the timer never runs; show a placeholder so the
+  // 2:00-ish spot in the layout doesn't suddenly empty out.
+  if (prefs.inspection === 'none') {
+    el.textContent = '—';
+    return;
+  }
   let ms = 0;
   if (mode === 'inspection') {
     if (prefs.inspection === 'pause') {
@@ -939,6 +964,12 @@ async function newScramble() {
     pendingScramble = null;
   } else {
     currentScramble = generateRandomScramble3x3();
+  }
+  // Broadcast to the peer if we're the active scramble-sharer. Suppress
+  // when applying a scramble received from the peer (otherwise the two
+  // peers would ping-pong indefinitely).
+  if (sharingScrambles && !applyingRemoteScramble && onLocalScrambleChange) {
+    onLocalScrambleChange(currentScramble);
   }
   const pre = precomputeScramblePatterns(currentScramble, start);
   scrambleMoves = pre.moves;
@@ -1056,6 +1087,8 @@ function onScrambleComplete() {
   if (abortBtn) abortBtn.disabled = false;
   if (prefs.inspection === 'pause') {
     renderStatus('Inspection (untimed). Make any turn to start solve timer.');
+  } else if (prefs.inspection === 'none') {
+    renderStatus('No-timer practice. Solve at your own pace — not recorded.');
   } else {
     const limitMs = parseInt(prefs.inspection, 10) * 1000;
     renderStatus(`Inspection: ${prefs.inspection}s`);
@@ -1070,12 +1103,15 @@ function startSolving() {
   mode = 'solving';
   solveStartMs = Date.now();
   pausedAccumMs = 0;
-  renderStatus(`Solving — phase: ${phaseSeq[0]?.label ?? '?'}`);
+  const untimed = prefs.inspection === 'none';
+  renderStatus(untimed
+    ? `Solving (untimed) — phase: ${phaseSeq[0]?.label ?? '?'}`
+    : `Solving — phase: ${phaseSeq[0]?.label ?? '?'}`);
   const pauseBtn = fsPauseBtnEl();
-  if (pauseBtn) pauseBtn.disabled = false;
+  if (pauseBtn) pauseBtn.disabled = untimed;  // pause is meaningless w/o a timer
   const abortBtn = fsAbortBtnEl();
   if (abortBtn) abortBtn.disabled = false;
-  startTimerLoop();
+  if (!untimed) startTimerLoop();
 }
 
 function onSolveMove(move: string) {
@@ -1139,9 +1175,15 @@ function finishSolve() {
   solveEndMs = Date.now();
   cancelAnimationFrame(timerRafHandle);
   renderTimer();
-  renderStatus('Solved!');
   const pauseBtn = fsPauseBtnEl();
   if (pauseBtn) pauseBtn.disabled = true;
+  // 'none' inspection = untimed practice. The solve doesn't get recorded
+  // and the stats boxes / graph don't change.
+  if (prefs.inspection === 'none') {
+    renderStatus('Solved! (untimed — not recorded)');
+    return;
+  }
+  renderStatus('Solved!');
   // Record solve
   const totalMs = solveEndMs - solveStartMs - pausedAccumMs;
   const phases: Record<string, number> = {};
@@ -2428,6 +2470,20 @@ function wireEvents() {
     renderGraph();
   });
 
+  // "Share scrambles" — toggling on broadcasts our current + future
+  // scrambles to the partner. The setter handles "claim" semantics and
+  // also kicks off an immediate broadcast of currentScramble so the
+  // partner syncs without waiting for the next scramble change.
+  const shareScramblesCb = document.getElementById('fs-share-scrambles') as HTMLInputElement | null;
+  shareScramblesCb?.addEventListener('change', () => {
+    if (peerSharingScrambles) {
+      // Greyed out — guard against any path that bypasses `disabled`.
+      shareScramblesCb.checked = false;
+      return;
+    }
+    setSharingScrambles(!!shareScramblesCb.checked);
+  });
+
   fsNewScrambleBtnEl()?.addEventListener('click', () => {
     void newScramble();
   });
@@ -2641,4 +2697,93 @@ export function fsSetCubeConnected(connected: boolean) {
 
 export function isFullSolveModeEnabled(): boolean {
   return prefs.enabled;
+}
+
+// ---------- Peer scramble-sharing API ----------
+// index.ts owns the network connection; it bridges Full Solve to the
+// peer by registering a callback that fires on every local scramble
+// change (when sharing is on), and by calling applyRemoteFsScramble when
+// a remote scramble arrives.
+
+export function setOnLocalScrambleChange(cb: ((scramble: string) => void) | null): void {
+  onLocalScrambleChange = cb;
+}
+
+// Fires when the local share switch toggles. index.ts broadcasts the new
+// state to the peer via 'fs-share' so its UI greys/un-greys appropriately.
+export function setOnShareStateChange(cb: ((sharing: boolean) => void) | null): void {
+  onShareStateChange = cb;
+}
+
+// Local switch: are WE the active sharer? Sender side broadcasts on
+// every scramble change.
+export function setSharingScrambles(on: boolean): void {
+  sharingScrambles = on;
+  updateShareScramblesUi();
+  // Notify the network bridge so the peer's UI can update + grey out.
+  if (onShareStateChange) onShareStateChange(on);
+  // When we start sharing, also broadcast our current scramble so the
+  // peer's UI immediately syncs.
+  if (on && currentScramble && onLocalScrambleChange) {
+    onLocalScrambleChange(currentScramble);
+  }
+}
+export function isSharingScrambles(): boolean { return sharingScrambles; }
+
+// Read-only accessor used by index.ts so a freshly-connected peer can be
+// sent the current FS scramble in the initial 'state' message.
+export function getCurrentFsScramble(): string { return currentScramble; }
+
+// Tracks whether the PEER is currently sharing. When true, our local
+// switch is greyed out (per the "only one at a time" rule).
+export function setPeerSharingScrambles(on: boolean): void {
+  peerSharingScrambles = on;
+  // If the peer just claimed sharing, give up our own claim (race).
+  if (on && sharingScrambles) {
+    sharingScrambles = false;
+  }
+  updateShareScramblesUi();
+}
+
+// Apply a scramble received from the peer. Routes through newScramble
+// so all the usual scramble-setup happens, but suppresses the local-
+// change callback to prevent an echo back to the sender.
+export function applyRemoteFsScramble(scramble: string): void {
+  if (!prefs.enabled) return;  // Full Solve isn't on locally — ignore.
+  pendingScramble = scramble;
+  applyingRemoteScramble = true;
+  void newScramble().finally(() => { applyingRemoteScramble = false; });
+}
+
+// Net connection state. When disconnected, force the share switch off
+// and clear peer state so the UI returns to single-user mode.
+export function setNetConnected(connected: boolean): void {
+  if (!connected) {
+    if (sharingScrambles) sharingScrambles = false;
+    peerSharingScrambles = false;
+  }
+  updateShareScramblesUi();
+}
+
+function updateShareScramblesUi(): void {
+  const wrap = document.getElementById('fs-share-scrambles-wrap');
+  const cb = document.getElementById('fs-share-scrambles') as HTMLInputElement | null;
+  if (!wrap || !cb) return;
+  // Visible only when Full Solve is on AND the peer is connected.
+  // (index.ts sets the peer-connection state on us via setNetConnected.)
+  const netConnected = wrap.dataset.netConnected === '1';
+  const visible = prefs.enabled && netConnected;
+  wrap.classList.toggle('hidden', !visible);
+  wrap.classList.toggle('flex', visible);
+  cb.checked = sharingScrambles;
+  cb.disabled = peerSharingScrambles;
+  wrap.title = peerSharingScrambles ? 'Partner is currently sharing scrambles' : '';
+}
+
+// Called by index.ts on connection state change. Sets the data
+// attribute the visibility check reads, then re-runs the UI sync.
+export function setShareScramblesNetVisible(netConnected: boolean): void {
+  const wrap = document.getElementById('fs-share-scrambles-wrap');
+  if (wrap) wrap.dataset.netConnected = netConnected ? '1' : '0';
+  setNetConnected(netConnected);
 }

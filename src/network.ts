@@ -13,10 +13,22 @@ export type NetMessage =
   | { type: 'move'; move: string }
   | { type: 'alg'; alg: string[]; name: string }
   | { type: 'scramble'; text: string; mode: boolean }
-  | { type: 'state'; alg: string[]; name: string; scramble: string; scrambleMode: boolean; hasCube: boolean; moves?: string[] }
+  | { type: 'state'; alg: string[]; name: string; scramble: string; scrambleMode: boolean; hasCube: boolean; moves?: string[]; fsScramble?: string; fsSharing?: boolean; facelets?: string }
   | { type: 'cube-connected'; connected: boolean }
   | { type: 'camera'; lat: number; lon: number }
-  | { type: 'challenge-scramble'; alg: string[]; name: string };
+  | { type: 'challenge-scramble'; alg: string[]; name: string }
+  // Full Solve scramble sharing. When one peer toggles their "Share
+  // scrambles" switch on, every scramble change is broadcast via
+  // 'fs-scramble' to the other peer, replacing the partner's current
+  // scramble. 'fs-share' announces who currently owns the sharing role
+  // (only one peer at a time) so the other peer's switch greys out.
+  | { type: 'fs-scramble'; text: string }
+  | { type: 'fs-share'; sharing: boolean }
+  // Viewer asks their partner to re-send a fresh 'state' message — used
+  // by the manual Sync State button when the cached remote view is stale
+  // (e.g., the cube was already scrambled before the app saw it, so the
+  // initial state sync had no facelets to work with).
+  | { type: 'request-state-sync' };
 
 export function generateRoomCode(): string {
   const word = WORDS[Math.floor(Math.random() * WORDS.length)];

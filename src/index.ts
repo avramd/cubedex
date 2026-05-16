@@ -26,7 +26,12 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
-import { initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, isFullSolveModeEnabled } from './fullSolve';
+import {
+  initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, isFullSolveModeEnabled,
+  setOnLocalScrambleChange, setOnShareStateChange, isSharingScrambles,
+  setPeerSharingScrambles, applyRemoteFsScramble, setShareScramblesNetVisible,
+  getCurrentFsScramble,
+} from './fullSolve';
 import { expandNotation, fixOrientation, getInverseMove, getOppositeMove, requestWakeLock, releaseWakeLock, initializeDefaultAlgorithms, saveAlgorithm, deleteAlgorithm, exportAlgorithms, importAlgorithms, loadAlgorithms, loadCategories, isSymmetricOLL, algToId, setStickering, setCategoryStickeringDeferred, loadSubsets, bestTimeString, bestTimeNumber, averageTimeString, averageOfFiveTimeNumber, learnedStatus, createTimeGraph, createStatsGraph, countMovesETM, getLastTimes, trailingWholeCubeRotationMoveCount, fullStickeringEnabled, setFullStickeringEnabled } from './functions';
 import { NetPeer, NetMessage } from './network';
 
@@ -121,7 +126,11 @@ if (cubeCellEl) {
   });
 }
 
-// Remote peer's cube (only appended to DOM when in split mode)
+// Remote peer's cube (only appended to DOM when in split mode).
+// experimentalDragInput is 'none' because we attach our OWN arcball
+// drag handler on the wrapper element below — that lets the drag-to-
+// reorient region cover the whole cube cell instead of being clipped
+// to cubing.js's internal canvas bounds.
 var twistyPlayerRemote = new TwistyPlayer({
   puzzle: '3x3x3',
   visualization: 'PG3D',
@@ -131,12 +140,73 @@ var twistyPlayerRemote = new TwistyPlayer({
   controlPanel: 'none',
   viewerLink: 'none',
   hintFacelets: 'floating',
-  experimentalDragInput: 'auto',
+  experimentalDragInput: 'none',
   cameraLatitude: 0,
   cameraLongitude: 0,
   tempoScale: 5,
   experimentalStickering: 'full',
 });
+
+// Local user-rotation offset applied to the remote cube's scene. Drag
+// pre-multiplies a delta onto this; the remote animation loop slerps the
+// scene toward `remoteOrientAdjust * remoteGyroTarget` so the partner's
+// reported gyro orientation is preserved on top of our manual rotation.
+const remoteOrientAdjust = new THREE.Quaternion();
+
+// Same arcball drag for the remote cube. Attached to the wrapper around
+// the twisty-player rather than the player itself, so the draggable
+// region is the whole cube cell (matching the local cube). Modifies
+// remoteOrientAdjust; the remote animation loop applies it.
+const remoteCubePlayerEl = document.getElementById('remote-cube-player');
+if (remoteCubePlayerEl) {
+  remoteCubePlayerEl.style.touchAction = 'none';
+  (twistyPlayerRemote as HTMLElement).style.cursor = 'grab';
+  let remoteDragAnchor: THREE.Vector3 | null = null;
+
+  function remotePointerToArcball(e: PointerEvent): THREE.Vector3 {
+    const rect = remoteCubePlayerEl!.getBoundingClientRect();
+    const radius = Math.min(rect.width, rect.height) / 2;
+    const nx =  (e.clientX - rect.left - rect.width  / 2) / radius;
+    const ny = -((e.clientY - rect.top  - rect.height / 2) / radius);
+    return arcballProject(nx, ny);
+  }
+
+  remoteCubePlayerEl.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    remoteDragAnchor = remotePointerToArcball(e);
+    remoteCubePlayerEl!.setPointerCapture(e.pointerId);
+    (twistyPlayerRemote as HTMLElement).style.cursor = 'grabbing';
+    // Decouple from peer's reported camera so dragging doesn't fight
+    // any incoming 'camera' broadcasts. Surface the Sync View button
+    // so the user can snap back.
+    if (netPeer.connected) {
+      remoteCameraSynced = false;
+      $('#sync-camera-btn').show();
+    }
+  });
+
+  remoteCubePlayerEl.addEventListener('pointermove', (e: PointerEvent) => {
+    if (!remoteDragAnchor || !(e.buttons & 1)) return;
+    const end = remotePointerToArcball(e);
+    const axis = new THREE.Vector3().crossVectors(remoteDragAnchor, end);
+    if (axis.lengthSq() < 1e-14) { remoteDragAnchor = end; return; }
+    const angle = Math.acos(Math.max(-1, Math.min(1, remoteDragAnchor.dot(end))));
+    const delta = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
+    remoteOrientAdjust.premultiply(delta);
+    remoteDragAnchor = end;
+  });
+
+  remoteCubePlayerEl.addEventListener('pointerup', (e: PointerEvent) => {
+    remoteCubePlayerEl!.releasePointerCapture(e.pointerId);
+    (twistyPlayerRemote as HTMLElement).style.cursor = 'grab';
+    remoteDragAnchor = null;
+  });
+
+  remoteCubePlayerEl.addEventListener('pointercancel', () => {
+    remoteDragAnchor = null;
+    (twistyPlayerRemote as HTMLElement).style.cursor = 'grab';
+  });
+}
 
 var conn: SmartCubeConnection | null;
 
@@ -413,6 +483,19 @@ function clearVisualQueue() {
 // ── Network sharing (WebRTC / PeerJS) ─────────────────────────────────────────
 
 const netPeer = new NetPeer();
+
+// Bridge Full Solve scramble changes → net broadcast. fullSolve.ts calls
+// this every time its currentScramble changes locally (new / paste / 🎯)
+// while the user has "Share scrambles" enabled.
+setOnLocalScrambleChange((scramble) => {
+  if (netPeer.connected) netPeer.send({ type: 'fs-scramble', text: scramble });
+});
+
+// Bridge Full Solve share-toggle changes → net broadcast so the peer's
+// switch can grey out / un-grey appropriately.
+setOnShareStateChange((sharing) => {
+  if (netPeer.connected) netPeer.send({ type: 'fs-share', sharing });
+});
 let remoteHasCube = false;
 let remoteAlgName = '';
 let remoteScramble = '';
@@ -465,7 +548,11 @@ async function animateRemoteCube() {
       }
     }
     if (twistySceneRemote) {
-      twistySceneRemote.quaternion.slerp(remoteGyroTarget, 0.25);
+      // Compose the partner's reported orientation with our local drag
+      // offset so manual drag-to-reorient persists across gyro frames
+      // from the partner.
+      const target = remoteOrientAdjust.clone().multiply(remoteGyroTarget);
+      twistySceneRemote.quaternion.slerp(target, 0.25);
     }
     if (twistyVantageRemote) {
       twistyVantageRemote.render();
@@ -532,14 +619,39 @@ netPeer.onMessage = (msg: NetMessage) => {
     case 'state':
       remoteVisualMoveQueue.length = 0;
       if (remoteVisualMoveTimer) { clearTimeout(remoteVisualMoveTimer); remoteVisualMoveTimer = null; }
-      twistyPlayerRemote.alg = msg.alg.join(' ');
-      // Replay physical moves made after the alg was set (skip animation — jump to current state)
-      for (const m of msg.moves ?? []) {
-        twistyPlayerRemote.experimentalAddMove(m, { cancel: false });
+      // Prefer the host's facelets when present — that's the
+      // authoritative current state and works even when the cube was
+      // already scrambled before the app saw it (no logged moves).
+      // Fall back to alg + post-alg moves concatenated for compatibility
+      // with peers that don't send facelets.
+      if (msg.facelets) {
+        try {
+          const setupAlg = min2phase.solve(msg.facelets);
+          // min2phase returns the SOLUTION (moves to solve the cube); to
+          // reproduce the scrambled state from solved we invert it.
+          twistyPlayerRemote.alg = setupAlg
+            ? Alg.fromString(setupAlg).invert().toString()
+            : '';
+        } catch {
+          twistyPlayerRemote.alg = [...(msg.alg || []), ...(msg.moves || [])].join(' ');
+        }
+      } else {
+        twistyPlayerRemote.alg = [...(msg.alg || []), ...(msg.moves || [])].join(' ');
       }
       remoteAlgName = msg.name;
       remoteScramble = msg.scramble;
       remoteHasCube = msg.hasCube;
+      // Initial Full Solve sync: if the peer is the active scramble
+      // sharer when we join, grey out our switch and adopt their current
+      // FS scramble.
+      if (msg.fsSharing) {
+        setPeerSharingScrambles(true);
+        if (typeof msg.fsScramble === 'string' && msg.fsScramble.length > 0) {
+          applyRemoteFsScramble(msg.fsScramble);
+        }
+      } else {
+        setPeerSharingScrambles(false);
+      }
       updateSplitMode();
       updateRemoteDisplay();
       break;
@@ -554,6 +666,23 @@ netPeer.onMessage = (msg: NetMessage) => {
         twistyPlayerRemote.cameraLatitude = msg.lat;
         twistyPlayerRemote.cameraLongitude = msg.lon;
       }
+      break;
+    case 'request-state-sync':
+      // Partner asked for a fresh snapshot — refresh from the smartcube
+      // first to catch any drift, then send our 'state' message.
+      void sendStateSnapshot(true);
+      break;
+    case 'fs-scramble':
+      // Partner is the active scramble-sharer; apply their scramble to
+      // our Full Solve mode. Echo suppression is handled inside
+      // applyRemoteFsScramble.
+      applyRemoteFsScramble(msg.text);
+      break;
+    case 'fs-share':
+      // Partner toggled their share switch. Update local state — when
+      // they're sharing, our switch greys out (the "only one at a time"
+      // constraint).
+      setPeerSharingScrambles(msg.sharing);
       break;
     case 'challenge-scramble':
       (async () => {
@@ -570,14 +699,25 @@ netPeer.onMessage = (msg: NetMessage) => {
   }
 };
 
-netPeer.onConnected = () => {
-  $('#net-waiting').hide();
-  $('#net-status').text('Connected ✓').show();
-  $('#net-disconnect-btn').show();
-  $('#net-hosting-area').hide();
-  $('#net-join-area').hide();
-  $('#net-main-btns').hide();
-  // Send full local state to the newly connected peer
+// Build and send the local 'state' snapshot to the peer. Extracted so
+// both the initial onConnected handshake AND the manual Sync State
+// button can use the same code path. Optionally requests fresh facelets
+// from the smartcube first — even when twistyTracker thinks it knows
+// the pattern, asking the cube directly avoids drift from missed events.
+async function sendStateSnapshot(refreshFromCube: boolean): Promise<void> {
+  if (!netPeer.connected) return;
+  // Ask the cube for current facelets first; the resulting FACELETS event
+  // updates twistyTracker before we read its pattern below. If the cube
+  // doesn't expose this capability (or isn't connected), we just read
+  // whatever twistyTracker has.
+  if (refreshFromCube && conn?.capabilities.facelets) {
+    try { await conn.sendCommand({ type: 'REQUEST_FACELETS' }); } catch { /* ignore */ }
+  }
+  let facelets: string | undefined;
+  try {
+    const p = await twistyTracker.experimentalModel.currentPattern.get();
+    facelets = patternToFacelets(p);
+  } catch { /* ignore */ }
   netPeer.send({
     type: 'state',
     alg: userAlg,
@@ -586,7 +726,24 @@ netPeer.onConnected = () => {
     scrambleMode,
     hasCube: !!conn,
     moves: appliedPhysicalMoves.slice(),
+    facelets,
+    fsSharing: isSharingScrambles(),
+    fsScramble: isSharingScrambles() ? (getCurrentFsScramble() || undefined) : undefined,
   });
+}
+
+netPeer.onConnected = () => {
+  $('#net-waiting').hide();
+  $('#net-status').text('Connected ✓').show();
+  $('#net-disconnect-btn').show();
+  $('#net-hosting-area').hide();
+  $('#net-join-area').hide();
+  $('#net-main-btns').hide();
+  // Show the Full Solve "Share scrambles" switch (visible only while
+  // connected to a peer).
+  setShareScramblesNetVisible(true);
+  // Push our current state to the freshly-connected peer.
+  void sendStateSnapshot(true);
   // Send current camera orientation
   (async () => {
     const coords = await (twistyPlayer.experimentalModel as any)?.twistySceneModel?.orbitCoordinates?.get();
@@ -599,6 +756,8 @@ netPeer.onConnected = () => {
 };
 
 netPeer.onDisconnected = () => {
+  // Hide the FS "Share scrambles" switch and reset its state on disconnect.
+  setShareScramblesNetVisible(false);
   remoteHasCube = false;
   remoteAlgName = '';
   remoteScramble = '';
@@ -720,6 +879,17 @@ $('#send-scramble-btn').on('click', () => {
   }
 });
 
+// Manual remote-state refresh. Useful when the auto-sync on connect
+// missed the host's actual cube state (e.g., the cube was already
+// scrambled before the app saw it, so twistyTracker started from solved
+// and there were no logged moves to replay).
+$('#sync-state-btn').on('click', () => {
+  if (!netPeer.connected) return;
+  netPeer.send({ type: 'request-state-sync' });
+  $('#sync-state-btn').text('🔄 Syncing…');
+  setTimeout(() => $('#sync-state-btn').text('🔄 Sync State'), 1200);
+});
+
 $('#sync-steps-btn').on('click', async () => {
   // Compute moves to get from viewer's physical cube state to sharer's current cube state.
   const myPattern = await twistyTracker.experimentalModel.currentPattern.get();
@@ -741,6 +911,9 @@ $('#sync-camera-btn').on('click', () => {
   remoteCameraSynced = true;
   twistyPlayerRemote.cameraLatitude = lastRemoteCameraLat;
   twistyPlayerRemote.cameraLongitude = lastRemoteCameraLon;
+  // Also clear any local drag offset so the cube fully snaps back to
+  // what the partner is showing.
+  remoteOrientAdjust.identity();
   $('#sync-camera-btn').hide();
 });
 
@@ -1512,23 +1685,52 @@ function solutionAlgFrom333Pattern(pattern: KPattern): Alg | null {
   return Alg.fromString(expandNotation(solvedStr.trim()).replace(/[()]/g, ''));
 }
 
+// When the user clicks "Sync Cube", we send REQUEST_FACELETS and arm
+// this flag so the NEXT incoming FACELETS event re-aligns the local
+// virtual cube with the physical state (rather than being ignored
+// because cubeStateInitialized is true).
+let resyncFromNextFacelets = false;
+
 function handleFaceletsEvent(event: SmartCubeEvent) {
-  if (event.type == "FACELETS" && !cubeStateInitialized) {
+  if (event.type !== "FACELETS") return;
+  if (!cubeStateInitialized) {
+    // First FACELETS event after connect. Adopt the cube's state into
+    // the tracker AND — when no training-mode alg is loaded — also
+    // into the visible twistyPlayer so a pre-scrambled cube doesn't
+    // appear solved on screen. If userAlg IS set, leave the visible
+    // cube alone: training mode is deliberately showing the alg's
+    // case (the user is expected to scramble TO it).
     sliceOrientation = { ...IDENTITY };
+    let setupAlg = '';
     if (event.facelets != SOLVED_STATE) {
       const kpattern = faceletsToPattern(event.facelets);
       const solution = solutionAlgFrom333Pattern(kpattern);
-      if (solution) {
-        twistyTracker.alg = solution.invert();
-      } else {
-        twistyTracker.alg = '';
-      }
-    } else {
-      twistyTracker.alg = '';
+      setupAlg = solution ? solution.invert().toString() : '';
+    }
+    twistyTracker.alg = setupAlg;
+    if (userAlg.length === 0) {
+      twistyPlayer.alg = setupAlg;
     }
     applyWhiteOnBottomState({ persist: false });
     cubeStateInitialized = true;
     console.log("Initial cube state is applied successfully", event.facelets);
+  } else if (resyncFromNextFacelets) {
+    // Manual sync mid-session: also update the VISIBLE twistyPlayer and
+    // reset the move log so subsequent peer broadcasts compute from a
+    // known baseline.
+    sliceOrientation = { ...IDENTITY };
+    let setupAlg = '';
+    if (event.facelets !== SOLVED_STATE) {
+      const kpattern = faceletsToPattern(event.facelets);
+      const solution = solutionAlgFrom333Pattern(kpattern);
+      setupAlg = solution ? solution.invert().toString() : '';
+    }
+    twistyTracker.alg = setupAlg;
+    twistyPlayer.alg = setupAlg;
+    appliedPhysicalMoves = [];
+    applyWhiteOnBottomState({ persist: false });
+    resyncFromNextFacelets = false;
+    console.log("Manual sync applied", event.facelets);
   }
 }
 
@@ -1680,6 +1882,23 @@ $('#reset-state').on('click', async () => {
   drawAlgInCube();
 });
 
+// Sync Cube: re-read the cube's current facelet state and update the
+// local virtual cube to match. Useful when the virtual cube has drifted
+// out of sync (missed BLE event, fast turn cluster, etc.).
+$('#header-sync-cube').on('click', async () => {
+  const btn = $('#header-sync-cube');
+  if (!conn || !conn.capabilities.facelets) return;
+  resyncFromNextFacelets = true;
+  btn.text('Syncing…');
+  try {
+    await conn.sendCommand({ type: 'REQUEST_FACELETS' });
+    setTimeout(() => btn.text('🔄 Sync Cube'), 1200);
+  } catch {
+    resyncFromNextFacelets = false;
+    btn.text('🔄 Sync Cube');
+  }
+});
+
 $('#reset-gyro').on('click', async () => {
   resetGyroBasis();
 });
@@ -1700,6 +1919,7 @@ function deviceDisconnected() {
   $('#reset-gyro').prop('disabled', true);
   $('#reset-state').prop('disabled', true);
   $('#device-info').prop('disabled', true);
+  $('#header-sync-cube').addClass('hidden');
   updateHeaderResetGyroState();
   $('.info input').val('- n/a -');
   setGyroscopeToggleDisabled(false);
@@ -1778,6 +1998,7 @@ $('#connect-button').on('click', async () => {
   $('#reset-gyro').prop('disabled', false);
   $('#reset-state').prop('disabled', false);
   $('#device-info').prop('disabled', false);
+  if (conn?.capabilities.facelets) $('#header-sync-cube').removeClass('hidden');
   $('#alg-input').attr('placeholder', "Enter alg e.g., (R U R' U) (R U2' R')");
   requestWakeLock();
   forceFix = true;

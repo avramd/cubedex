@@ -208,11 +208,21 @@
             <div id="remote-cube" class="hidden flex-1 flex flex-col items-center justify-center min-w-0 min-h-0">
               <div id="remote-cube-player" class="w-full flex items-center justify-center"></div>
               <div id="remote-alg-name" class="text-xs font-bold text-center text-gray-700 dark:text-gray-300 mt-1 truncate max-w-full px-1"></div>
-              <button id="sync-camera-btn" class="hidden text-xs bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-2 rounded hover:bg-gray-300 dark:hover:bg-gray-500 mt-1">↩ Sync View</button>
             </div>
           </div>
-          <div id="right-side" class="col-span-1 flex flex-col flex-grow items-center sm:items-end text-sm sm:text-base order-1 sm:order-3 h-full relative z-10">
-            <div class="flex items-center gap-2">
+          <!-- This column has `h-full` and `z-10` (so its buttons stay above
+               an over-wide cube area), but that makes its EMPTY bottom region
+               sit on top of the remote cube and steal pointer events. Solve
+               by making the column itself transparent to pointer events and
+               re-enabling them on every actual interactive group. -->
+          <div id="right-side" class="col-span-1 flex flex-col flex-grow items-center sm:items-end text-sm sm:text-base order-1 sm:order-3 h-full relative z-10 pointer-events-none">
+            <div class="flex items-center gap-2 pointer-events-auto">
+              <button
+                id="header-sync-cube"
+                class="hidden bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap"
+                type="button"
+                title="Re-read the cube's current facelet state and update the virtual cube to match — use this if your virtual cube has drifted out of sync."
+              >🔄 Sync Cube</button>
               <button
                 id="header-reset-gyro"
                 class="hidden bg-blue-500 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-300 ease-in-out hover:bg-blue-700 text-sm sm:text-base align-middle flex items-center whitespace-nowrap"
@@ -232,7 +242,7 @@
                 </div>
               </button>
             </div>
-            <div id="net-panel" class="flex flex-col items-end gap-1 mt-2 text-sm">
+            <div id="net-panel" class="flex flex-col items-end gap-1 mt-2 text-sm pointer-events-auto">
               <!-- Default: Share + Join buttons -->
               <div id="net-main-btns" class="flex gap-1">
                 <button id="net-share-btn" class="bg-gray-200 dark:bg-gray-600 dark:text-white text-gray-800 font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">🔗 Share</button>
@@ -260,8 +270,13 @@
               <div id="net-status" class="hidden text-xs text-gray-500 dark:text-gray-400"></div>
               <button id="net-disconnect-btn" class="hidden text-xs text-red-500 hover:text-red-700 dark:text-red-400">Disconnect</button>
             </div>
+            <!-- The touch-timer fills the empty bottom of #right-side
+                 (h-full / w-full) which is exactly the region that was
+                 stealing drag events from the remote cube. Re-enable
+                 pointer events ONLY on the timer pill itself, not the
+                 empty surrounding box. -->
             <div id="touch-timer" class="flex justify-center items-center h-full w-full">
-              <div id="timer" class="hidden text-right font-mono p-2 border border-gray-400 rounded-lg dark:border-gray-700 dark:text-white text-sm sm:text-xl md:text-2xl lg:text-3xl mt-2 sm:ml-8"></div>
+              <div id="timer" class="hidden text-right font-mono p-2 border border-gray-400 rounded-lg dark:border-gray-700 dark:text-white text-sm sm:text-xl md:text-2xl lg:text-3xl mt-2 sm:ml-8 pointer-events-auto"></div>
             </div>
           </div>
         </div>
@@ -295,11 +310,13 @@
           <span id="alg-scramble-text"></span>
           <div id="alg-scramble-hint" class="hidden absolute inset-0 flex items-center justify-start rounded-lg text-xs"><div class="flex flex-row gap-2 pl-2"><svg viewBox="0 0 24 24" fill="none" class="h-6 w-6 shrink-0" xmlns="http://www.w3.org/2000/svg"><defs><style>.cls-1{fill:none;stroke:currentColor;stroke-miterlimit:10;stroke-width:1.91px;}</style></defs><path class="cls-1" d="M18.68,1.48H5.32A3.82,3.82,0,0,0,1.5,5.3v9.54a3.82,3.82,0,0,0,3.82,3.82H9.14L12,21.52l2.86-2.86h3.82a3.82,3.82,0,0,0,3.82-3.82V5.3A3.82,3.82,0,0,0,18.68,1.48Z"/><line class="cls-1" x1="10.09" y1="13.89" x2="13.91" y2="13.89"/><polyline class="cls-1" points="10.09 8.16 12 8.16 12 13.89"/><line class="cls-1" x1="11.05" y1="5.3" x2="12.95" y2="5.3"/></svg><p id="alg-scramble-hint-text" class="pt-1">Ensure the cube is oriented with WHITE center on top and GREEN center on front.</p></div></div>
         </div>
-        <div id="remote-info" class="hidden mx-auto max-w-[1032px] flex flex-row items-center gap-3 text-gray-600 dark:text-gray-300 p-2 mb-2 text-xs sm:text-sm">
-          <span class="font-bold truncate" id="remote-scramble-label">Partner:</span>
-          <span id="remote-scramble-display" class="font-mono flex-1 truncate"></span>
-          <button id="send-scramble-btn" class="hidden bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap" title="Send this case to your partner">📤 Send Case</button>
-          <button id="sync-steps-btn" class="hidden bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">Sync Steps</button>
+        <div id="remote-info" class="hidden mx-auto max-w-[1032px] flex flex-row flex-nowrap items-center gap-3 text-gray-600 dark:text-gray-300 p-2 mb-2 text-xs sm:text-sm">
+          <span class="font-bold flex-shrink-0" id="remote-scramble-label">Partner:</span>
+          <span id="remote-scramble-display" class="font-mono flex-1 min-w-0 truncate"></span>
+          <button id="sync-state-btn" class="flex-shrink-0 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap" title="Ask your partner's app to re-send their current cube state">🔄 Sync State</button>
+          <button id="sync-camera-btn" class="hidden flex-shrink-0 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap" title="Re-align the partner's cube view with their reported camera orientation">↩ Sync View</button>
+          <button id="send-scramble-btn" class="hidden flex-shrink-0 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap" title="Send this case to your partner">📤 Send Case</button>
+          <button id="sync-steps-btn" class="hidden flex-shrink-0 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-white font-bold py-1 px-3 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-xs whitespace-nowrap">Sync Steps</button>
         </div>
 
       </div>
@@ -562,13 +579,24 @@
                   <option value="10">10 seconds</option>
                   <option value="15" selected>15 seconds</option>
                   <option value="pause">Pause</option>
+                  <option value="none">No timer</option>
                 </select>
               </div>
               <div id="fs-cfop-options" class="hidden flex-col gap-1 justify-end text-xs sm:text-sm">
-                <label class="flex items-center gap-2" title="Split each F2L band into sub-bands by slot-count milestones.">
-                  <input type="checkbox" id="fs-graph-f2l-splits" class="form-checkbox h-4 w-4 text-blue-600" />
-                  <span>F2L slots</span>
-                </label>
+                <div class="flex flex-wrap gap-3">
+                  <label class="flex items-center gap-2" title="Split each F2L band into sub-bands by slot-count milestones.">
+                    <input type="checkbox" id="fs-graph-f2l-splits" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>F2L slots</span>
+                  </label>
+                  <!-- Visible only when a peer is connected. When ON, every
+                       scramble change broadcasts to the partner. Only one peer
+                       can have this on at a time; the other side's switch
+                       greys out via fs-share messages. -->
+                  <label id="fs-share-scrambles-wrap" class="hidden items-center gap-2" data-net-connected="0" title="Broadcast your scrambles to your connected partner.">
+                    <input type="checkbox" id="fs-share-scrambles" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>Share scrambles</span>
+                  </label>
+                </div>
                 <div class="flex flex-wrap gap-3">
                   <label class="flex items-center gap-2">
                     <input type="checkbox" id="fs-twolook-oll-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
