@@ -118,6 +118,84 @@ describe('mergeImportedHistory — passthrough of optional fields', () => {
   });
 });
 
+describe('mergeImportedHistory — full-record round-trip contract', () => {
+  // KITCHEN-SINK record: every documented field on SolveRecord set to a
+  // non-default value. When you add a new field to SolveRecord, ALSO add
+  // it here AND to the deep-equality assertion below. The test then fails
+  // until import/export demonstrably preserves it.
+  const kitchenSink: SolveRecord = {
+    ts: 1700000000000,
+    scramble: "R U R' U R U2 R'",
+    solution: "R U R' U R U2 R'",
+    totalMs: 12345,
+    phases: { cross: 1000, f2l: 4000, eoll: 600, ocll: 1100, cpll: 500, epll: 800 },
+    process: 'cfop',
+    twoLookOll: true,
+    twoLookPll: true,
+    turns: [0.21, 0.45, 0.83, 1.4, 2.1, 3.6, 5.8, 9.1, 11.2],
+    f2lSplits: [1100, 2300, 3500, 5000],
+  };
+
+  it('export → import preserves every documented SolveRecord field byte-for-byte', () => {
+    // Export = JSON.stringify of the array of records. Import = parse +
+    // merge. This is the actual code path on the wire.
+    const exportedJson = JSON.stringify([kitchenSink]);
+    const parsed = JSON.parse(exportedJson);
+    const result = mergeImportedHistory([], parsed, 500);
+    expect(result.added).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(result.merged).toHaveLength(1);
+    expect(result.merged[0]).toEqual(kitchenSink);
+  });
+
+  it('forward-compat: an unknown future field survives import unchanged', () => {
+    // The merge stores records as-received (no field filtering), so a
+    // future client that adds a new field to SolveRecord can be imported
+    // here without losing data. Tested with a synthetic future field.
+    const future = JSON.parse(JSON.stringify({
+      ...kitchenSink,
+      ts: kitchenSink.ts + 1,
+      futureFeatureMs: [10, 20, 30],   // not in the type yet
+      futureFlags: { whateverThisIs: true },
+    }));
+    const result = mergeImportedHistory([], [future], 500);
+    expect(result.added).toBe(1);
+    expect(result.merged[0]).toEqual(future);
+  });
+
+  it('backwards-compat: a legacy record (no turns / f2lSplits / split phases) imports cleanly', () => {
+    // Pre-feature record shape: only the originally-shipped fields. The
+    // import path must NOT reject these, and they must come out unchanged.
+    const legacy = {
+      ts: 1600000000000,
+      scramble: "R U R' U' R' F R F'",
+      solution: "R U R' U' R' F R F'",
+      totalMs: 9876,
+      phases: { cross: 800, f2l: 3500, oll: 1200, pll: 1500 },
+      process: 'cfop' as const,
+      twoLookOll: false,
+      twoLookPll: false,
+    };
+    const result = mergeImportedHistory([], [legacy], 500);
+    expect(result.added).toBe(1);
+    expect(result.merged[0]).toEqual(legacy);
+    // …including not silently injecting turns/f2lSplits — derived fields
+    // come from the post-merge backfill in fullSolve.ts, not from the
+    // pure merge. (Backfill itself has its own tests.)
+    expect((result.merged[0] as any).turns).toBeUndefined();
+    expect((result.merged[0] as any).f2lSplits).toBeUndefined();
+  });
+
+  it('full round-trip survives JSON serialization with no precision loss on turn timestamps', () => {
+    // turns are fractional seconds; verify a precise value (5 decimals)
+    // round-trips losslessly through JSON.
+    const r = rec(1, 1000, { turns: [0.12345, 1.23456, 2.34567, 9.99999] });
+    const serialized = JSON.parse(JSON.stringify([r]));
+    const result = mergeImportedHistory([], serialized, 500);
+    expect(result.merged[0].turns).toEqual([0.12345, 1.23456, 2.34567, 9.99999]);
+  });
+});
+
 describe('mergeImportedHistory — cap', () => {
   it('drops the OLDEST records when over cap', () => {
     const existing = [rec(1, 1000), rec(2, 1000)];
