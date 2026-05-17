@@ -51,4 +51,22 @@ export interface SolveRecord {
   // records made before this field — graph renders those as a single
   // F2L band even with the toggle on.
   f2lSplits?: number[];
+  // Wall-clock duration of the inspection phase in ms (from "scramble
+  // complete" to "solve start"). Used by the CSV export to emit a single
+  // `inspection` row with a negative timestamp.
+  inspectionMs?: number;
+  // True iff the solve timer started because the inspection countdown
+  // expired (rather than because the user made their first move during
+  // inspection). The CSV export emits an extra `start` row with
+  // timestamp 0 when this is set.
+  inspectionAutoExpired?: boolean;
+  // True iff this record represents an incomplete solve (timer stopped
+  // before the final-phase predicate fired). CSV export emits an
+  // `abort` row in place of the `solved` row.
+  aborted?: boolean;
+  // Optional ms-from-solve-start at the explicit abort. Present only
+  // when the user clicked abort during an active solve; absent when the
+  // record is otherwise incomplete (no explicit abort moment to point
+  // to). CSV emits the timestamp on the `abort` row when present.
+  abortedAtMs?: number;
 }

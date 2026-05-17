@@ -14,6 +14,7 @@ import { moveClass, collapseDoubles, parseScramble } from './fullSolve/moves';
 import { classifyMoves } from './fullSolve/classify';
 import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
+import { historyToCsv } from './fullSolve/csvExport';
 import { rollingAverage, meanAndSd } from './fullSolve/stats';
 import { placeLabelsAvoidOverlap, remapClippedTargets } from './fullSolve/labelLayout';
 
@@ -128,6 +129,22 @@ function exportHistoryAsJson() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   a.href = url;
   a.download = `cubedex-solve-history-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Analysis-friendly export: per-physical-move CSV (timestamp,move,phase)
+// with blank rows between solves. NOT re-importable — for re-import use
+// the JSON export. Pure CSV building lives in fullSolve/csvExport.ts.
+function exportHistoryAsCsvFile() {
+  const blob = new Blob([historyToCsv(history)], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `cubedex-solve-history-${stamp}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -439,6 +456,7 @@ const fsPasteScrambleBtnEl = () => $$<HTMLButtonElement>('fs-paste-scramble-btn'
 const fsSolveListEl = () => $$('fs-solve-list');
 const fsSolveListHintEl = () => $$('fs-solve-list-hint');
 const fsExportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-export-history');
+const fsExportHistoryCsvBtnEl = () => $$<HTMLButtonElement>('fs-export-history-csv');
 const fsImportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-import-history');
 const fsImportHistoryInputEl = () => $$<HTMLInputElement>('fs-import-history-input');
 // Full Solve renders into the same large graphing area training mode uses.
@@ -513,6 +531,10 @@ let pausedAccumMs = 0;      // ms accumulated across pause intervals
 let pauseStartedAtMs = 0;
 let inspectionStartMs = 0;
 let inspectionTimeoutHandle: number | null = null;
+// Set true if the inspection countdown ran out and auto-started the
+// solve timer (vs the user making a move during inspection). Persisted
+// onto the SolveRecord so CSV export can emit a `start` row at t=0.
+let inspectionAutoExpiredFlag = false;
 let timerRafHandle = 0;
 let phaseSeq: PhaseDef[] = [];
 let phaseTimestamps: (number | null)[] = [];   // one per transition point; null until reached
@@ -1004,6 +1026,7 @@ function resetSolveState() {
   solveStartMs = 0;
   solveEndMs = 0;
   inspectionStartMs = 0;
+  inspectionAutoExpiredFlag = false;
   solveMoves = [];
   solveTurns = [];
   solveF2lSplits = [];
@@ -1094,7 +1117,13 @@ function onScrambleComplete() {
     const limitMs = parseInt(prefs.inspection, 10) * 1000;
     renderStatus(`Inspection: ${prefs.inspection}s`);
     inspectionTimeoutHandle = window.setTimeout(() => {
-      if (mode === 'inspection') startSolving();
+      if (mode === 'inspection') {
+        // Mark the transition as an auto-expire so the CSV export knows
+        // to emit a `start` row. The flag persists on the SolveRecord
+        // via finishSolve.
+        inspectionAutoExpiredFlag = true;
+        startSolving();
+      }
     }, limitMs);
   }
   startTimerLoop();
@@ -1213,6 +1242,14 @@ function finishSolve() {
     // Only attach when we actually recorded splits — keeps records small
     // for runs that didn't hit the F2L phase (e.g. beginner mode).
     ...(solveF2lSplits.length > 0 ? { f2lSplits: solveF2lSplits.slice() } : {}),
+    // Inspection metadata for CSV export. inspectionMs is the wall-clock
+    // duration from "scramble done" to "solve start"; the auto-expired
+    // flag is set only when the countdown ran out (not when the user
+    // started early by making a move during inspection).
+    ...(inspectionStartMs > 0 && solveStartMs > inspectionStartMs
+        ? { inspectionMs: solveStartMs - inspectionStartMs }
+        : {}),
+    ...(inspectionAutoExpiredFlag ? { inspectionAutoExpired: true } : {}),
   };
   history.push(record);
   saveHistory();
@@ -2579,6 +2616,10 @@ function wireEvents() {
     prefs.f2lSplits = !!fsGraphF2lSplitsEl()?.checked;
     savePrefs();
     renderGraph();
+  });
+
+  fsExportHistoryCsvBtnEl()?.addEventListener('click', () => {
+    exportHistoryAsCsvFile();
   });
 
   fsExportHistoryBtnEl()?.addEventListener('click', () => {
