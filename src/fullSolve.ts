@@ -538,6 +538,7 @@ const F2L_KEYS = new Set(['f2l', 'f2l_1', 'f2l_2', 'f2l_3', 'f2l_4']);
 const LL_KEYS  = new Set(['oll', 'pll', 'eoll', 'ocll', 'cpll', 'epll', 'll']);
 
 function groupOfKey(k: string): 'cross' | 'f2l' | 'll' | null {
+  if (k.startsWith('idle:')) k = k.slice(5);
   if (k === 'cross' || k === 'setup') return 'cross';
   if (F2L_KEYS.has(k)) return 'f2l';
   if (LL_KEYS.has(k))  return 'll';
@@ -1287,6 +1288,18 @@ function renderGraph() {
       // bail back to the unfocused view.
       focusedPhaseGroup = null;
       keyOrder = displaySeq.map(p => p.key);
+    } else {
+      // Insert an "idle:<phase>" key BEFORE each phase key. The idle
+      // dataset gets the same `tension: 0.15` smoothing as the bands, so
+      // the shaded region's bottom and top curves match the band edges
+      // automatically — no need to replicate Chart.js's cardinal-spline
+      // math in our own polygon plugin.
+      const expanded: string[] = [];
+      for (const k of keyOrder) {
+        expanded.push('idle:' + k);
+        expanded.push(k);
+      }
+      keyOrder = expanded;
     }
   }
   const labels = slice.map((_, i) => `${history.length - slice.length + i + 1}`);
@@ -1323,17 +1336,82 @@ function renderGraph() {
 
   // For a stacked-area chart without activating Chart.js's scale-level stacking
   // (which would also stack the Ao5/Ao12 trendlines), compute cumulative values
-  // per solve and let each dataset fill down to the previous one.
+  // per solve and let each dataset fill down to the previous one. For an
+  // "idle:<phase>" key, the segment height is the phase's initial idle ms;
+  // for the underlying phase key it's (total phase ms − idle ms) so the
+  // two together sum to the full phase duration.
   const cumulative: number[][] = slice.map(() => []);
   slice.forEach((r, solveIdx) => {
     let acc = 0;
     for (const k of keyOrder) {
-      acc += phaseMsForDisplay(r, k) / 1000;
+      let segmentMs: number;
+      if (k.startsWith('idle:')) {
+        const phaseKey = k.slice(5);
+        const totalMs = phaseMsForDisplay(r, phaseKey);
+        segmentMs = totalMs > 0 ? Math.min(phaseIdleMsFor(r, phaseKey), totalMs) : 0;
+      } else if (focusedPhaseGroup) {
+        const totalMs = phaseMsForDisplay(r, k);
+        const idleMs  = totalMs > 0 ? Math.min(phaseIdleMsFor(r, k), totalMs) : 0;
+        segmentMs = totalMs - idleMs;
+      } else {
+        segmentMs = phaseMsForDisplay(r, k);
+      }
+      acc += segmentMs / 1000;
       cumulative[solveIdx].push(acc);
     }
   });
 
+  // Idle-stripe color for a focused phase band. Reproduces the look of
+  // the original polygon-plugin shading (a 20% white-overlay in dark
+  // mode, 20% black-overlay in light mode) as a *solid fill* so the
+  // dataset approach can match it. Algebra: a band at alpha A draws as
+  //   visible = A·phase + (1−A)·bg
+  // and the overlay makes it
+  //   visible' = 0.20·overlay + 0.80·visible
+  //            = 0.20·overlay + 0.80·A·phase + 0.80·(1−A)·bg
+  // A solid fill X at alpha A_idle reproduces this iff
+  //   A_idle    = 0.20 + 0.80·A
+  //   A_idle·X  = 0.20·overlay + 0.80·A·phase
+  // (so the result is independent of the actual background color).
+  const isDarkForIdle = document.documentElement.classList.contains('dark');
+  const OVERLAY_RGB = isDarkForIdle ? 255 : 0;
+  const OVERLAY_ALPHA = 0.20;
+  const idleColorForPhase = (rgba: string): string => {
+    const m = rgba.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)$/);
+    if (!m) return rgba;
+    const r = Number(m[1]);
+    const g = Number(m[2]);
+    const b = Number(m[3]);
+    const a = Number(m[4]);
+    const aIdle = OVERLAY_ALPHA + (1 - OVERLAY_ALPHA) * a;
+    const xR = (OVERLAY_ALPHA * OVERLAY_RGB + (1 - OVERLAY_ALPHA) * a * r) / aIdle;
+    const xG = (OVERLAY_ALPHA * OVERLAY_RGB + (1 - OVERLAY_ALPHA) * a * g) / aIdle;
+    const xB = (OVERLAY_ALPHA * OVERLAY_RGB + (1 - OVERLAY_ALPHA) * a * b) / aIdle;
+    return `rgba(${Math.round(xR)}, ${Math.round(xG)}, ${Math.round(xB)}, ${aIdle.toFixed(3)})`;
+  };
+
   const datasets: any[] = keyOrder.map((k, kIdx) => {
+    if (k.startsWith('idle:')) {
+      // Phantom dataset that draws the idle stripe at the bottom of each
+      // focused phase band. Same tension as the bands so the curves match
+      // exactly; color is a darker shade of the phase's own color so the
+      // stripe is read as part of that phase (not a foreign grey overlay).
+      const phaseKey = k.slice(5);
+      return {
+        type: 'line' as const,
+        label: '',
+        data: cumulative.map(row => row[kIdx]),
+        backgroundColor: idleColorForPhase(colorForKey(phaseKey)),
+        borderColor: 'transparent',
+        borderWidth: 0,
+        fill: kIdx === 0 ? 'origin' : '-1',
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        tension: 0.15,
+        order: 2,
+        clip: false,
+      };
+    }
     const fill = colorForKey(k);
     const stroke = fill.replace(/(0\.\d+)\)/, '1)');
     return {
@@ -1450,63 +1528,10 @@ function renderGraph() {
   const labelTextColor = isDarkNow ? '#ffffff' : '#111827';
   const pillBg = isDarkNow ? 'rgba(0,0,0,0.72)' : 'rgba(255,255,255,0.92)';
 
-  // Plugin: shade the initial idle period of each visible phase. The
-  // shaded area is a continuous polygon between two lines, one solve to
-  // the next: the bottom edge follows the end of the previous phase
-  // (i.e. the band's lower boundary) and the top edge follows that line
-  // raised by the idle ms (the gap before the first turn of the phase).
-  // Only renders in focus views — F2L or LL — where the rebaseline-from-
-  // zero view makes the idle stripe legible.
-  const idleShadingPlugin = {
-    id: 'idleShading',
-    afterDatasetsDraw(chart: any) {
-      if (!focusedPhaseGroup) return;
-      if (slice.length === 0) return;
-      const xScale = chart.scales.x;
-      const yScale = chart.scales.y;
-      const ctx: CanvasRenderingContext2D = chart.ctx;
-      const xs = slice.map((_, i) => xScale.getPixelForValue(i));
-      const isDark = document.documentElement.classList.contains('dark');
-      ctx.save();
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.20)' : 'rgba(0,0,0,0.20)';
-      // Track the "previous phase top" line as we walk keyOrder; for the
-      // first key it's just 0 (chart origin).
-      let prevValuesSec: number[] = slice.map(() => 0);
-      for (let i = 0; i < keyOrder.length; i++) {
-        const key = keyOrder[i];
-        const currentValuesSec = slice.map((_, col) => cumulative[col][i]);
-        const idleTopsSec = slice.map((r, col) => {
-          const phaseSec = currentValuesSec[col] - prevValuesSec[col];
-          if (phaseSec <= 0) return prevValuesSec[col];
-          const idleMs = phaseIdleMsFor(r, key);
-          const idleSec = Math.min(idleMs / 1000, phaseSec);
-          return prevValuesSec[col] + idleSec;
-        });
-        const anyIdle = idleTopsSec.some((v, col) => v > prevValuesSec[col]);
-        if (anyIdle) {
-          ctx.beginPath();
-          // Left-to-right along the bottom edge (previous phase top).
-          for (let col = 0; col < slice.length; col++) {
-            const x = xs[col];
-            const y = yScale.getPixelForValue(prevValuesSec[col]);
-            if (col === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-          }
-          // Right-to-left along the top edge (first-turn line). Columns
-          // with zero idle naturally collapse the polygon onto its
-          // bottom edge there, so the shaded region tapers correctly.
-          for (let col = slice.length - 1; col >= 0; col--) {
-            const x = xs[col];
-            const y = yScale.getPixelForValue(idleTopsSec[col]);
-            ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-          ctx.fill();
-        }
-        prevValuesSec = currentValuesSec;
-      }
-      ctx.restore();
-    },
-  };
+  // (Idle shading is now achieved by inserting an "idle:<phase>" dataset
+  // before each phase's dataset in focus views — those phantom datasets
+  // share the bands' `tension: 0.15` so the shading curves match the
+  // band edges automatically. See keyOrder construction above.)
 
   // Custom plugin: on hover, draw per-phase split times at each line's data
   // point — vertically de-overlapped, edge-flipped to stay inside the chart,
@@ -1560,6 +1585,10 @@ function renderGraph() {
           const r = slice[idx];
           const k = keyOrder[dsIdx];
           if (!r || !k) return;
+          // Phantom "idle:<phase>" datasets exist only to draw the idle
+          // shading stripe inside each focused phase band; they're not
+          // meaningful entries for the hover label stack.
+          if (k.startsWith('idle:')) return;
           // In F2L focus, emit a chit per sub-band (labelled 1P/2P/3P/4P
           // via labelForKey); the F2L total is added separately as a
           // chit-less entry. In any other view, collapse the 4 sub-bands
@@ -1761,7 +1790,7 @@ function renderGraph() {
   graphChart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets },
-    plugins: [idleShadingPlugin, inlineSplitLabels],
+    plugins: [inlineSplitLabels],
     options: {
       responsive: true,
       animation: false,
