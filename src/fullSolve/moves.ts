@@ -47,6 +47,21 @@ export function parseScramble(text: string): string | null {
   return tokens.join(' ');
 }
 
+// Invert a single move token: `R` ↔ `R'`, `R2` is self-inverse.
+// Half-turn directionality (`R2` vs `R'2`) is intentionally elided —
+// the storage format collapses both into `R2`, so the inverse is `R2`.
+export function invertMove(m: string): string {
+  if (m.endsWith("'")) return m.slice(0, -1);
+  if (m.endsWith('2')) return m;
+  return m + "'";
+}
+
+// Invert a sequence of moves: reverse the order, then invert each.
+// Composing the original sequence with this result yields a no-op.
+export function invertMoves(moves: string[]): string[] {
+  return moves.slice().reverse().map(invertMove);
+}
+
 // Collapse adjacent quarter-turn pairs of the same move into a single
 // half-turn. Smartcubes report half-turns as two consecutive quarter-
 // turn events (so a user U2 lands as ['U', 'U']) — collapsing gives a

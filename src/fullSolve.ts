@@ -10,10 +10,14 @@ import {
 } from './cube/predicates';
 import { generateRandomScramble3x3 } from './cube/scramble';
 import { type Process, type SolveRecord } from './fullSolve/types';
-import { moveClass, collapseDoubles, parseScramble } from './fullSolve/moves';
+import { moveClass, collapseDoubles, parseScramble, invertMoves } from './fullSolve/moves';
 import { classifyMoves } from './fullSolve/classify';
 import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
+import {
+  classifyPauseMove, computePauseReversePath, isPauseMoveClickable,
+  type PauseState,
+} from './fullSolve/pauseModel';
 import { historyToCsv } from './fullSolve/csvExport';
 import { rollingAverage, meanAndSd } from './fullSolve/stats';
 import { placeLabelsAvoidOverlap, remapClippedTargets } from './fullSolve/labelLayout';
@@ -529,6 +533,18 @@ let solveStartMs = 0;
 let solveEndMs = 0;
 let pausedAccumMs = 0;      // ms accumulated across pause intervals
 let pauseStartedAtMs = 0;
+// Interactive-pause state. Captured on togglePause→paused and mutated as
+// the user physically reverses / redoes / wanders. Cleared on resume.
+// pauseState.originalMoves is the snapshot of solveMoves at pause entry;
+// pauseOriginalTurns is the parallel solveTurns snapshot; pauseOriginalSeq
+// is the phaseSeq at pause entry (held to color each original move by
+// the phase it contributed to). See src/fullSolve/pauseModel.ts.
+let pauseState: PauseState = {
+  originalMoves: [], frontier: -1, wayward: [], redoneSet: new Set<number>(),
+  targetIdx: null,
+};
+let pauseOriginalTurns: number[] = [];
+let pauseOriginalPhaseReached: number[] = [];
 let inspectionStartMs = 0;
 let inspectionTimeoutHandle: number | null = null;
 // Set true if the inspection countdown ran out and auto-started the
@@ -866,16 +882,6 @@ function renderScrambleDisplay() {
   }
 }
 
-function invertMoves(moves: string[]): string[] {
-  return moves.slice().reverse().map(invertMove);
-}
-
-function invertMove(m: string): string {
-  if (m.endsWith("'")) return m.slice(0, -1);
-  if (m.endsWith('2')) return m;
-  return m + "'";
-}
-
 // ---------- Solve UI rendering ----------
 
 function renderTimer() {
@@ -942,30 +948,89 @@ function renderStatus(text: string) {
 
 function renderSolutionMoves() {
   const el = fsSolutionMovesEl();
-  if (el) setFormattedMoves(el, collapseDoubles(solveMoves).join(' '));
+  if (!el) return;
+  if (mode === 'paused') {
+    renderPausedSolveMoves(el);
+    return;
+  }
+  setFormattedMoves(el, collapseDoubles(solveMoves).join(' '));
+}
+
+// During pause, render the snapshotted original-move list as individual
+// (uncollapsed) interactive spans, with per-move phase coloring, plus
+// any wayward off-plan moves in italics at the tail. The collapsing we
+// normally do at storage time is skipped here so each click maps 1:1 to
+// an original-move index.
+function renderPausedSolveMoves(el: HTMLElement) {
+  el.replaceChildren();
+  const phaseColorForIdx = (i: number): string => {
+    // The move at index i contributed to the smallest phase p whose
+    // reached-at-index is strictly greater than i (the move that
+    // COMPLETED a phase lands one index before that phase's marker).
+    for (let p = 0; p < pauseOriginalPhaseReached.length; p++) {
+      const reachedAt = pauseOriginalPhaseReached[p];
+      if (reachedAt < 0) continue;
+      if (reachedAt > i) return phaseSeq[p]?.color ?? '';
+    }
+    return '';
+  };
+  for (let i = 0; i < pauseState.originalMoves.length; i++) {
+    const m = pauseState.originalMoves[i];
+    const span = document.createElement('span');
+    span.className = `${moveClass(m)} fs-paused-move`;
+    span.textContent = m;
+    if (i > pauseState.frontier) {
+      span.classList.add('text-gray-400', 'dark:text-gray-500');
+    } else {
+      const color = phaseColorForIdx(i);
+      if (color) span.style.color = color;
+      if (pauseState.redoneSet.has(i)) {
+        span.classList.add('underline');
+      } else if (isPauseMoveClickable(pauseState, i)) {
+        span.classList.add('cursor-pointer');
+        span.addEventListener('click', () => onPausedMoveClick(i));
+      }
+      if (i === pauseState.targetIdx) {
+        span.classList.add('ring-2', 'ring-offset-1', 'rounded');
+      }
+    }
+    el.appendChild(span);
+    if (i < pauseState.originalMoves.length - 1) {
+      el.appendChild(document.createTextNode(' '));
+    }
+  }
+  if (pauseState.wayward.length > 0) {
+    el.appendChild(document.createTextNode(' | '));
+    for (let j = 0; j < pauseState.wayward.length; j++) {
+      const w = pauseState.wayward[j];
+      const span = document.createElement('span');
+      span.className = `${moveClass(w)} italic`;
+      span.textContent = w;
+      el.appendChild(span);
+      if (j < pauseState.wayward.length - 1) {
+        el.appendChild(document.createTextNode(' '));
+      }
+    }
+  }
+}
+
+function onPausedMoveClick(idx: number) {
+  if (mode !== 'paused') return;
+  if (!isPauseMoveClickable(pauseState, idx)) return;
+  pauseState = { ...pauseState, targetIdx: idx };
+  renderSolutionMoves();
+  renderRetraceHint();
 }
 
 function renderRetraceHint() {
-  // The hint shows the inverse of moves taken since the most recent passed phase boundary
-  // (or since solve start), so the user can step back to that checkpoint.
+  // During pause, show the user the move-by-move reverse path to whichever
+  // original-move-index they clicked. The head of the list is the next
+  // move they should make; completed moves drop off the front.
   const el = fsRetraceHintEl();
   if (!el) return;
   if (mode !== 'paused') { el.replaceChildren(); return; }
-  const checkpointIdx = lastReachedPhaseMoveIndex();
-  const recent = solveMoves.slice(checkpointIdx);
-  setFormattedMoves(el, collapseDoubles(invertMoves(recent)).join(' '));
-}
-
-function lastReachedPhaseMoveIndex(): number {
-  // Find the move index at which the most recent phase was completed.
-  // phaseTimestamps[i] is the timestamp when phase[i] was reached; we also store
-  // a parallel array of move indices so we know where each phase ended.
-  // For simplicity (and since we only need "last passed boundary"), look backwards
-  // through phaseReachedAtMoveIdx.
-  for (let i = phaseReachedAtMoveIdx.length - 1; i >= 0; i--) {
-    if (phaseReachedAtMoveIdx[i] >= 0) return phaseReachedAtMoveIdx[i];
-  }
-  return 0;
+  const path = computePauseReversePath(pauseState);
+  setFormattedMoves(el, collapseDoubles(path).join(' '));
 }
 
 let phaseReachedAtMoveIdx: number[] = [];
@@ -1036,6 +1101,12 @@ function resetSolveState() {
   phaseSeq = currentPhaseSequence();
   phaseTimestamps = phaseSeq.map(() => null);
   phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
+  pauseState = {
+    originalMoves: [], frontier: -1, wayward: [],
+    redoneSet: new Set<number>(), targetIdx: null,
+  };
+  pauseOriginalTurns = [];
+  pauseOriginalPhaseReached = [];
   const pauseBtn = fsPauseBtnEl();
   if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = 'Pause'; }
   const abortBtn = fsAbortBtnEl();
@@ -1145,7 +1216,16 @@ function startSolving() {
 }
 
 function onSolveMove(move: string) {
-  if (mode === 'paused') return; // moves ignored while paused, but still added to history if user wants? For now, ignore.
+  if (mode === 'paused') {
+    // While paused, the cube has already been turned (fsOnPhysicalMove
+    // applies the move to myPattern regardless of mode). Run the move
+    // through the pause state machine so the UI tracks rewind / redo /
+    // wayward exploration; the new solveMoves are reconciled on resume.
+    pauseState = classifyPauseMove(pauseState, move).next;
+    renderSolutionMoves();
+    renderRetraceHint();
+    return;
+  }
   solveMoves.push(move);
   solveTurns.push((Date.now() - solveStartMs - pausedAccumMs) / 1000);
   renderSolutionMoves();
@@ -1266,20 +1346,83 @@ function togglePause() {
     mode = 'paused';
     pauseStartedAtMs = Date.now();
     cancelAnimationFrame(timerRafHandle);
+    // Snapshot the solve so the investigation surface has a stable
+    // reference. solveMoves / solveTurns / phaseReachedAtMoveIdx are
+    // reconciled at resume from pauseState + wayward.
+    pauseState = {
+      originalMoves: solveMoves.slice(),
+      frontier: solveMoves.length - 1,
+      wayward: [],
+      redoneSet: new Set<number>(),
+      targetIdx: null,
+    };
+    pauseOriginalTurns = solveTurns.slice();
+    pauseOriginalPhaseReached = phaseReachedAtMoveIdx.slice();
     renderTimer();
+    renderSolutionMoves();
     renderRetraceHint();
     const pauseBtn = fsPauseBtnEl();
     if (pauseBtn) pauseBtn.textContent = 'Resume';
-    renderStatus('Paused — retrace or investigate, then resume.');
+    renderStatus('Paused — click any move to plan a rewind.');
   } else if (mode === 'paused') {
     pausedAccumMs += Date.now() - pauseStartedAtMs;
     pauseStartedAtMs = 0;
     mode = 'solving';
+    reconcileSolveAfterPause();
+    // Drop the snapshot now that we've rebuilt the live state.
+    pauseState = {
+      originalMoves: [], frontier: -1, wayward: [],
+      redoneSet: new Set<number>(), targetIdx: null,
+    };
+    pauseOriginalTurns = [];
+    pauseOriginalPhaseReached = [];
+    renderSolutionMoves();
     renderRetraceHint();
     startTimerLoop();
     const pauseBtn = fsPauseBtnEl();
     if (pauseBtn) pauseBtn.textContent = 'Pause';
     renderStatus('Solving…');
+    // Edge case: if the user happened to solve the cube during pause
+    // (or reversed and re-solved differently), reconcile sets the final
+    // phase timestamp directly. finishSolve normally runs from inside
+    // evaluatePhaseTransitions; the post-resume move would skip the
+    // already-set predicate, so trigger it here.
+    if (phaseTimestamps.length > 0 && phaseTimestamps[phaseTimestamps.length - 1] !== null) {
+      finishSolve();
+    }
+  }
+}
+
+// On resume, rebuild the canonical solve state to match the cube's
+// actual position: keep the original moves up to the current frontier,
+// append any wayward off-plan moves, and re-evaluate phase predicates
+// against the current facelets. Phases the user reversed past clear
+// out; phases still satisfied are re-timestamped at "now" (approximate
+// wall-clock, but keeps downstream counters internally consistent).
+function reconcileSolveAfterPause() {
+  const frontier = pauseState.frontier;
+  const keptMoves = pauseState.originalMoves.slice(0, frontier + 1);
+  const keptTurns = pauseOriginalTurns.slice(0, frontier + 1);
+  const nowSec = (Date.now() - solveStartMs - pausedAccumMs) / 1000;
+  solveMoves = keptMoves.concat(pauseState.wayward);
+  solveTurns = keptTurns.concat(pauseState.wayward.map(() => nowSec));
+
+  // Re-evaluate phase predicates against the actual current cube.
+  phaseTimestamps = phaseSeq.map(() => null);
+  phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
+  if (myPattern) {
+    let facelets: string;
+    try { facelets = patternToFacelets(myPattern); } catch { return; }
+    const now = Date.now() - pausedAccumMs;
+    for (let i = 0; i < phaseSeq.length; i++) {
+      if (i > 0 && phaseTimestamps[i - 1] === null) break;
+      if (phaseSeq[i].predicate(facelets)) {
+        phaseTimestamps[i] = now;
+        phaseReachedAtMoveIdx[i] = solveMoves.length;
+      } else {
+        break;
+      }
+    }
   }
 }
 
@@ -2723,7 +2866,10 @@ export function fsOnPhysicalMove(move: string) {
     onSolveMove(move);
     if (myFacelets) evaluatePhaseTransitions(myFacelets);
   } else if (mode === 'paused') {
-    // Moves while paused are ignored (user is investigating / retracing).
+    // During pause the timer is frozen but the cube is still being
+    // turned — let the pause state machine classify the move (reverse /
+    // redo / wayward) and re-render the investigation surface.
+    onSolveMove(move);
   }
 }
 
