@@ -457,6 +457,7 @@ const fsRetraceHintEl = () => $$('fs-retrace-hint');
 const fsPauseBtnEl = () => $$<HTMLButtonElement>('fs-pause-btn');
 const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
+const fsCopyScrambleBtnEl = () => $$<HTMLButtonElement>('fs-copy-scramble-btn');
 const fsPasteScrambleBtnEl = () => $$<HTMLButtonElement>('fs-paste-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
 const fsSolveListHintEl = () => $$('fs-solve-list-hint');
@@ -2803,6 +2804,19 @@ function wireEvents() {
 
   fsNewScrambleBtnEl()?.addEventListener('click', () => {
     void newScramble();
+  });
+
+  fsCopyScrambleBtnEl()?.addEventListener('click', async () => {
+    if (!currentScramble) {
+      alert('No scramble loaded yet.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(currentScramble);
+      renderStatus('Scramble copied to clipboard.');
+    } catch {
+      alert('Clipboard access denied. Allow clipboard write in your browser settings to copy scrambles.');
+    }
   });
 
   fsPasteScrambleBtnEl()?.addEventListener('click', async () => {
