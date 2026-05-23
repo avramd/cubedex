@@ -138,6 +138,7 @@ describe('mergeImportedHistory — full-record round-trip contract', () => {
     inspectionAutoExpired: true,
     aborted: true,
     abortedAtMs: 7250,
+    tags: ['speed', 'two look pll', 'warmup'],
   };
 
   it('export → import preserves every documented SolveRecord field byte-for-byte', () => {

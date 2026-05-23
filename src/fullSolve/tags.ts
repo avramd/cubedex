@@ -1,0 +1,114 @@
+import type { SolveRecord } from './types';
+
+// Pure helpers for the solve-tagging feature: normalization, the tag
+// corpus (with usage counts), sort/filter for the editor dialog, the
+// include/exclude graph filter, and recent-set management. Kept DOM-
+// free so it's straightforward to unit-test.
+
+// Lowercase, trim, collapse internal whitespace. Returns null for
+// inputs that are empty after trimming (the editor uses null to
+// reject the would-be tag without inserting it).
+export function normalizeTag(s: string): string | null {
+  const trimmed = s.trim().toLowerCase().replace(/\s+/g, ' ');
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+// Count occurrences of every tag across the history. Tags are assumed
+// to already be normalized (they're normalized on write at the editor
+// boundary; older imports may not be — those are coerced via
+// normalizeTag here as a defensive measure).
+export function allTagsWithCounts(history: SolveRecord[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const r of history) {
+    if (!r.tags) continue;
+    for (const raw of r.tags) {
+      const t = normalizeTag(raw);
+      if (!t) continue;
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+// Sort tags for display in the editor list. Filter is a normalized
+// prefix; when empty, the whole corpus is returned. Order: usage
+// count descending, then alphabetical. The first entry is the
+// "most-used match" used by the auto-fill behavior.
+export function sortedTagsForDialog(
+  counts: Map<string, number>,
+  filter: string,
+): string[] {
+  const f = filter.trim().toLowerCase();
+  const matched: string[] = [];
+  for (const tag of counts.keys()) {
+    if (!f || tag.startsWith(f)) matched.push(tag);
+  }
+  matched.sort((a, b) => {
+    const ca = counts.get(a) ?? 0;
+    const cb = counts.get(b) ?? 0;
+    if (ca !== cb) return cb - ca;
+    return a.localeCompare(b);
+  });
+  return matched;
+}
+
+export interface TagFilter {
+  include: string[];
+  exclude: string[];
+}
+
+// Apply include/exclude filter to a history slice. Semantics:
+//   - empty include AND empty exclude → all records pass
+//   - exclude wins: any record having ANY excluded tag is dropped,
+//     even if it also has an included tag
+//   - non-empty include: at least one included tag must be present
+//   - empty include + non-empty exclude: pass everything except
+//     records with excluded tags
+export function applyTagFilter(
+  records: SolveRecord[],
+  filter: TagFilter,
+): SolveRecord[] {
+  const inc = filter.include;
+  const exc = filter.exclude;
+  if (inc.length === 0 && exc.length === 0) return records.slice();
+  return records.filter(r => {
+    const tags = r.tags ?? [];
+    if (exc.length > 0) {
+      for (const t of tags) if (exc.includes(t)) return false;
+    }
+    if (inc.length === 0) return true;
+    for (const t of tags) if (inc.includes(t)) return true;
+    return false;
+  });
+}
+
+// LRU-ish recents: prepend the new set, drop any prior equal set,
+// cap to `max` entries. Equality is structural (same tags in same
+// order on both sides). The caller normalizes filter sides before
+// passing them in.
+export function pushRecentTagSet(
+  recents: TagFilter[],
+  next: TagFilter,
+  max = 5,
+): TagFilter[] {
+  // Don't record the empty filter — "All Solves" is a permanent
+  // first-class menu option, not a recent.
+  if (next.include.length === 0 && next.exclude.length === 0) return recents.slice();
+  const key = JSON.stringify(next);
+  const filtered = recents.filter(r => JSON.stringify(r) !== key);
+  filtered.unshift({ include: next.include.slice(), exclude: next.exclude.slice() });
+  return filtered.slice(0, max);
+}
+
+// Compact human-readable label for a tag filter, used as the option
+// text in the filter dropdown. Empty sides are omitted; both empty
+// returns 'All Solves'.
+export function tagFilterLabel(filter: TagFilter): string {
+  const inc = filter.include;
+  const exc = filter.exclude;
+  if (inc.length === 0 && exc.length === 0) return 'All Solves';
+  const parts: string[] = [];
+  if (inc.length > 0) parts.push(`include: ${inc.join(', ')}`);
+  if (exc.length > 0) parts.push(`exclude: ${exc.join(', ')}`);
+  return parts.join(' | ');
+}

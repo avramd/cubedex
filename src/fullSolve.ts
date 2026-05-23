@@ -20,6 +20,11 @@ import {
   type PauseState,
 } from './fullSolve/pauseModel';
 import { historyToCsv } from './fullSolve/csvExport';
+import {
+  normalizeTag, allTagsWithCounts, sortedTagsForDialog,
+  applyTagFilter, pushRecentTagSet, tagFilterLabel,
+  type TagFilter,
+} from './fullSolve/tags';
 import { rollingAverage, meanAndSd } from './fullSolve/stats';
 import { placeLabelsAvoidOverlap, remapClippedTargets } from './fullSolve/labelLayout';
 
@@ -51,6 +56,16 @@ interface FullSolvePrefs {
   // milestone recorded in SolveRecord.f2lSplits. Solves without f2lSplits
   // (pre-feature records) render as a single full-alpha band regardless.
   f2lSplits: boolean;
+  // Tags pending to be applied to the NEXT completed solve. Sticky:
+  // they remain after each solve until the user removes them via the
+  // pre-solve tag editor.
+  pendingSolveTags: string[];
+  // Active graph tag filter — see src/fullSolve/tags.ts:applyTagFilter.
+  // Both sides empty = "All Solves".
+  graphTagFilter: { include: string[]; exclude: string[] };
+  // Most-recent committed filters from the advanced dialog (LRU,
+  // capped at 5). Surfaced as options in the tags-filter dropdown.
+  recentTagSets: { include: string[]; exclude: string[] }[];
 }
 
 interface PhaseDef {
@@ -78,6 +93,9 @@ const defaultPrefs: FullSolvePrefs = {
   graphAo5: true,
   graphAo12: true,
   f2lSplits: false,
+  pendingSolveTags: [],
+  graphTagFilter: { include: [], exclude: [] },
+  recentTagSets: [],
 };
 
 function loadPrefs(): FullSolvePrefs {
@@ -465,6 +483,23 @@ const fsExportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-export-history');
 const fsExportHistoryCsvBtnEl = () => $$<HTMLButtonElement>('fs-export-history-csv');
 const fsImportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-import-history');
 const fsImportHistoryInputEl = () => $$<HTMLInputElement>('fs-import-history-input');
+const fsPendingTagsBtnEl = () => $$<HTMLButtonElement>('fs-pending-tags-btn');
+const fsPendingTagsDisplayEl = () => $$('fs-pending-tags-display');
+const fsTagsFilterMenuEl = () => $$<HTMLSelectElement>('fs-tags-filter-menu');
+const fsTagEditorDialogEl = () => $$<HTMLDialogElement>('fs-tag-editor-dialog');
+const fsTagEditorTitleEl = () => $$('fs-tag-editor-title');
+const fsTagEditorSelectedEl = () => $$('fs-tag-editor-selected');
+const fsTagEditorInputEl = () => $$<HTMLInputElement>('fs-tag-editor-input');
+const fsTagEditorListEl = () => $$('fs-tag-editor-list');
+const fsTagEditorCancelEl = () => $$<HTMLButtonElement>('fs-tag-editor-cancel');
+const fsTagEditorConfirmEl = () => $$<HTMLButtonElement>('fs-tag-editor-confirm');
+const fsTagsFilterDialogEl = () => $$<HTMLDialogElement>('fs-tags-filter-dialog');
+const fsFilterIncludeEl = () => $$('fs-filter-include');
+const fsFilterUnselectedEl = () => $$('fs-filter-unselected');
+const fsFilterExcludeEl = () => $$('fs-filter-exclude');
+const fsFilterClearEl = () => $$<HTMLButtonElement>('fs-filter-clear');
+const fsFilterCancelEl = () => $$<HTMLButtonElement>('fs-filter-cancel');
+const fsFilterConfirmEl = () => $$<HTMLButtonElement>('fs-filter-confirm');
 // Full Solve renders into the same large graphing area training mode uses.
 const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('statsGraph');
 const algStatsEl = () => $$('alg-stats');
@@ -757,7 +792,10 @@ function restoreTrainingLegend() {
 }
 
 function renderStatsBoxes() {
-  const totals = history.map(r => r.totalMs);
+  // Filter applied uniformly with the graph so the stats boxes
+  // reflect the same slice the user is looking at.
+  const filtered = filteredHistory();
+  const totals = filtered.map(r => r.totalMs);
   if (totals.length === 0) {
     averageTimeBoxEl()?.replaceChildren();
     if (averageTimeBoxEl()) averageTimeBoxEl()!.innerHTML = 'Average Time<br />--';
@@ -771,7 +809,7 @@ function renderStatsBoxes() {
   if (averageTimeBoxEl()) averageTimeBoxEl()!.innerHTML = `Average Time<br />${formatTime(meanMs)}`;
 
   // TPS: total moves / total time (in seconds), averaged over last 12.
-  const recentRecords = history.slice(-12);
+  const recentRecords = filtered.slice(-12);
   let totalMoves = 0;
   let totalSec = 0;
   recentRecords.forEach(r => {
@@ -1408,6 +1446,12 @@ function finishSolve() {
         ? { inspectionMs: solveStartMs - inspectionStartMs }
         : {}),
     ...(inspectionAutoExpiredFlag ? { inspectionAutoExpired: true } : {}),
+    // Apply any pre-selected tags from the scramble row's tag editor.
+    // Sticky: prefs.pendingSolveTags persists across solves until the
+    // user clears them via the dialog.
+    ...(prefs.pendingSolveTags.length > 0
+        ? { tags: prefs.pendingSolveTags.slice() }
+        : {}),
   };
   history.push(record);
   saveHistory();
@@ -1540,8 +1584,11 @@ function invertMoveTok(m: string): string {
 function renderGraph() {
   const canvas = fsGraphCanvasEl();
   if (!canvas) return;
-  const range = Math.max(1, Math.min(history.length, prefs.graphRange));
-  const slice = history.slice(-range);
+  // Active tag filter applied to history BEFORE everything else, so
+  // graph + AoX trendlines all reflect the same view.
+  const filtered = filteredHistory();
+  const range = Math.max(1, Math.min(filtered.length, prefs.graphRange));
+  const slice = filtered.slice(-range);
   if (slice.length === 0) {
     if (graphChart) { graphChart.destroy(); graphChart = null; }
     return;
@@ -1591,7 +1638,7 @@ function renderGraph() {
       keyOrder = expanded;
     }
   }
-  const labels = slice.map((_, i) => `${history.length - slice.length + i + 1}`);
+  const labels = slice.map((_, i) => `${filtered.length - slice.length + i + 1}`);
 
   // Alpha-scaled green for F2L sub-bands. Legacy records (no f2lSplits)
   // are folded into sub-band 4 by phaseMsForDisplay, so they render at
@@ -1736,7 +1783,10 @@ function renderGraph() {
   // visible window. Otherwise the first few entries in the window can't
   // form a complete window of size N and the trendline would flat-line
   // at null even when prior data exists to compute it from.
-  const allTotals = history.map(recordTotalSec);
+  // AoX uses the FILTERED history, so the trendlines reflect only
+  // solves matching the active tag filter — and recompute when the
+  // filter changes.
+  const allTotals = filtered.map(recordTotalSec);
   const tailOf = (arr: (number | null)[]) => arr.slice(-slice.length);
   const ao5Series = prefs.graphAo5 ? tailOf(rollingAverage(allTotals, 5)) : null;
   const ao12Series = prefs.graphAo12 ? tailOf(rollingAverage(allTotals, 12)) : null;
@@ -2668,6 +2718,26 @@ function renderSolveList() {
     });
     actions.appendChild(eyeBtn);
 
+    // 🏷️ opens the tag editor for this solve. The chip on the row
+    // shows current tags (if any); the editor reuses the global
+    // dialog seeded with this row's tags.
+    const tagBtn = document.createElement('button');
+    tagBtn.className = iconBtnClass;
+    tagBtn.textContent = '🏷️';
+    tagBtn.title = 'Edit tags';
+    tagBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const next = await openTagEditor(r.tags ?? [], `Tags · ${formatTime(r.totalMs)}`);
+      if (next === null) return;
+      // Mutate the actual history record (use realIdx because `r` may
+      // come from a reversed slice in the renderer).
+      if (next.length > 0) history[realIdx].tags = next;
+      else delete history[realIdx].tags;
+      saveHistory();
+      renderAllFilterDependent();
+    });
+    actions.appendChild(tagBtn);
+
     // 🪗 toggles between the default (storage-form) display and the
     // expanded view that strikes through same-face groups and italicises
     // their net-equivalent move. The accordion icon itself is shown
@@ -2839,6 +2909,19 @@ function wireEvents() {
     void newScramble();
   });
 
+  fsPendingTagsBtnEl()?.addEventListener('click', () => {
+    void openPendingTagsEditor();
+  });
+
+  fsTagsFilterMenuEl()?.addEventListener('change', () => {
+    const sel = fsTagsFilterMenuEl();
+    if (!sel) return;
+    void onTagsFilterMenuChange(sel.value);
+  });
+
+  wireTagEditorDialog();
+  wireAdvancedFilterDialog();
+
   fsPauseBtnEl()?.addEventListener('click', () => {
     togglePause();
   });
@@ -2933,6 +3016,314 @@ function applyPrefsToUI() {
   const ga5 = fsGraphAo5El(); if (ga5) ga5.checked = prefs.graphAo5;
   const ga12 = fsGraphAo12El(); if (ga12) ga12.checked = prefs.graphAo12;
   const f2ls = fsGraphF2lSplitsEl(); if (f2ls) f2ls.checked = prefs.f2lSplits;
+  renderPendingTagsDisplay();
+  renderTagsFilterMenu();
+}
+
+// ---------- Tags (dialogs, filter menu, per-row UI) ----------
+
+// Apply the active tag filter to the history before any render
+// (graph, stats boxes, legend, etc.). Calling this through the
+// renderers keeps the displayed view internally consistent.
+function filteredHistory(): SolveRecord[] {
+  return applyTagFilter(history, prefs.graphTagFilter);
+}
+
+// Trigger every renderer that reads from history. Used after a tag
+// edit, a filter change, or anything else that affects the active
+// slice.
+function renderAllFilterDependent() {
+  renderGraph();
+  renderStatsBoxes();
+  renderStatsLegend();
+  renderSolveList();
+  renderTagsFilterMenu();
+}
+
+// --- Tag editor dialog ------------------------------------------------
+
+// In-flight resolver: openTagEditor returns a promise that the
+// dialog's Cancel/Save handlers settle.
+let tagEditorResolve: ((tags: string[] | null) => void) | null = null;
+let tagEditorSelected: string[] = [];
+
+function openTagEditor(initial: string[], title = 'Tags'): Promise<string[] | null> {
+  const dlg = fsTagEditorDialogEl();
+  if (!dlg) return Promise.resolve(null);
+  // If a previous open is still pending (shouldn't happen, but defensively)
+  // resolve it as a cancel before reusing the dialog.
+  if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+  tagEditorSelected = initial.slice();
+  const titleEl = fsTagEditorTitleEl();
+  if (titleEl) titleEl.textContent = title;
+  const input = fsTagEditorInputEl();
+  if (input) input.value = '';
+  renderTagEditorSelected();
+  renderTagEditorList('');
+  dlg.showModal();
+  if (input) input.focus();
+  return new Promise<string[] | null>(resolve => { tagEditorResolve = resolve; });
+}
+
+function renderTagEditorSelected() {
+  const el = fsTagEditorSelectedEl();
+  if (!el) return;
+  el.replaceChildren();
+  for (const t of tagEditorSelected) {
+    const chip = document.createElement('span');
+    chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-xs';
+    chip.textContent = t;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '×';
+    x.className = 'leading-none text-blue-800 dark:text-blue-100 hover:text-red-600';
+    x.addEventListener('click', () => {
+      tagEditorSelected = tagEditorSelected.filter(s => s !== t);
+      renderTagEditorSelected();
+      renderTagEditorList(fsTagEditorInputEl()?.value ?? '');
+    });
+    chip.appendChild(x);
+    el.appendChild(chip);
+  }
+}
+
+function renderTagEditorList(filter: string) {
+  const el = fsTagEditorListEl();
+  if (!el) return;
+  const counts = allTagsWithCounts(history);
+  const f = normalizeTag(filter) ?? '';
+  const all = sortedTagsForDialog(counts, f);
+  el.replaceChildren();
+  for (const t of all) {
+    if (tagEditorSelected.includes(t)) continue;
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer';
+    const label = document.createElement('span');
+    label.textContent = t;
+    const count = document.createElement('span');
+    count.className = 'text-xs text-gray-500';
+    count.textContent = String(counts.get(t) ?? 0);
+    row.appendChild(label);
+    row.appendChild(count);
+    row.addEventListener('click', () => addCurrentInputAsTag(t));
+    el.appendChild(row);
+  }
+}
+
+function addCurrentInputAsTag(value: string) {
+  const t = normalizeTag(value);
+  if (!t) return;
+  if (!tagEditorSelected.includes(t)) tagEditorSelected.push(t);
+  const input = fsTagEditorInputEl();
+  if (input) input.value = '';
+  renderTagEditorSelected();
+  renderTagEditorList('');
+}
+
+function wireTagEditorDialog() {
+  const dlg = fsTagEditorDialogEl();
+  const input = fsTagEditorInputEl();
+  if (!dlg || !input) return;
+  fsTagEditorCancelEl()?.addEventListener('click', () => {
+    dlg.close();
+    if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+  });
+  fsTagEditorConfirmEl()?.addEventListener('click', () => {
+    dlg.close();
+    if (tagEditorResolve) {
+      tagEditorResolve(tagEditorSelected.slice());
+      tagEditorResolve = null;
+    }
+  });
+  // ESC closes via native dialog behavior — handle it as cancel.
+  dlg.addEventListener('close', () => {
+    if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+  });
+
+  input.addEventListener('input', (e) => {
+    // Skip auto-fill on backspace / delete so the user can edit
+    // the suffix without it being instantly re-filled.
+    const inputType = (e as InputEvent).inputType ?? '';
+    const isBackspace = inputType.startsWith('delete');
+    const typed = input.value;
+    const filter = normalizeTag(typed) ?? '';
+    renderTagEditorList(typed);
+    if (isBackspace || !filter) return;
+    const counts = allTagsWithCounts(history);
+    const matches = sortedTagsForDialog(counts, filter);
+    const top = matches.find(t => !tagEditorSelected.includes(t));
+    if (top && top.length > typed.length && top.startsWith(filter)) {
+      // Preserve the user's actual capitalization in the typed prefix
+      // (normalization is lowercase, but the suffix is appended as-is
+      // from the corpus). Then select the suffix so the next keystroke
+      // overwrites it.
+      const beforeLen = typed.length;
+      input.value = typed + top.slice(filter.length);
+      input.setSelectionRange(beforeLen, input.value.length);
+    }
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCurrentInputAsTag(input.value);
+    }
+  });
+}
+
+// --- Pre-solve tag UI -------------------------------------------------
+
+function renderPendingTagsDisplay() {
+  const el = fsPendingTagsDisplayEl();
+  if (!el) return;
+  el.textContent = prefs.pendingSolveTags.length > 0
+    ? prefs.pendingSolveTags.join(', ')
+    : '';
+}
+
+async function openPendingTagsEditor() {
+  const next = await openTagEditor(prefs.pendingSolveTags, 'Tags for next solve');
+  if (next === null) return;
+  prefs.pendingSolveTags = next;
+  savePrefs();
+  renderPendingTagsDisplay();
+}
+
+// --- Filter dropdown menu --------------------------------------------
+
+function renderTagsFilterMenu() {
+  const sel = fsTagsFilterMenuEl();
+  if (!sel) return;
+  const current = prefs.graphTagFilter;
+  const currentKey = JSON.stringify(current);
+  sel.replaceChildren();
+  const addOpt = (value: string, label: string, selected: boolean) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    if (selected) opt.selected = true;
+    sel.appendChild(opt);
+  };
+  const isEmpty = current.include.length === 0 && current.exclude.length === 0;
+  addOpt('__all__', 'All Solves', isEmpty);
+  for (const r of prefs.recentTagSets) {
+    addOpt(JSON.stringify(r), tagFilterLabel(r), JSON.stringify(r) === currentKey);
+  }
+  addOpt('__select__', 'Select…', false);
+}
+
+async function onTagsFilterMenuChange(value: string) {
+  if (value === '__select__') {
+    await openAdvancedFilterDialog();
+    renderTagsFilterMenu();
+    return;
+  }
+  if (value === '__all__') {
+    prefs.graphTagFilter = { include: [], exclude: [] };
+  } else {
+    try {
+      prefs.graphTagFilter = JSON.parse(value) as TagFilter;
+    } catch {
+      prefs.graphTagFilter = { include: [], exclude: [] };
+    }
+  }
+  savePrefs();
+  renderTagsFilterMenu();
+  renderAllFilterDependent();
+}
+
+// --- Advanced filter dialog (3 columns) ------------------------------
+
+let filterDialogIncl: string[] = [];
+let filterDialogExcl: string[] = [];
+let filterDialogResolve: (() => void) | null = null;
+
+function openAdvancedFilterDialog(): Promise<void> {
+  const dlg = fsTagsFilterDialogEl();
+  if (!dlg) return Promise.resolve();
+  filterDialogIncl = prefs.graphTagFilter.include.slice();
+  filterDialogExcl = prefs.graphTagFilter.exclude.slice();
+  renderAdvancedFilterDialog();
+  dlg.showModal();
+  return new Promise<void>(resolve => { filterDialogResolve = resolve; });
+}
+
+function renderAdvancedFilterDialog() {
+  const incEl = fsFilterIncludeEl();
+  const unEl = fsFilterUnselectedEl();
+  const excEl = fsFilterExcludeEl();
+  if (!incEl || !unEl || !excEl) return;
+  const counts = allTagsWithCounts(history);
+  const allTags = Array.from(counts.keys()).sort();
+  const unselected = allTags.filter(t => !filterDialogIncl.includes(t) && !filterDialogExcl.includes(t));
+
+  const makeChip = (tag: string, column: 'inc' | 'un' | 'exc') => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-xs';
+    const label = document.createElement('span');
+    label.textContent = tag;
+    row.appendChild(label);
+    const actions = document.createElement('div');
+    actions.className = 'flex gap-1';
+    const mkBtn = (text: string, title: string, onClick: () => void) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = text;
+      b.title = title;
+      b.className = 'leading-none px-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700';
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    const removeFromAll = () => {
+      filterDialogIncl = filterDialogIncl.filter(t => t !== tag);
+      filterDialogExcl = filterDialogExcl.filter(t => t !== tag);
+    };
+    if (column === 'un') {
+      actions.appendChild(mkBtn('+ Include', 'Move to Include', () => {
+        removeFromAll(); filterDialogIncl.push(tag); renderAdvancedFilterDialog();
+      }));
+      actions.appendChild(mkBtn('− Exclude', 'Move to Exclude', () => {
+        removeFromAll(); filterDialogExcl.push(tag); renderAdvancedFilterDialog();
+      }));
+    } else {
+      actions.appendChild(mkBtn('Remove', 'Move back to All tags', () => {
+        removeFromAll(); renderAdvancedFilterDialog();
+      }));
+    }
+    row.appendChild(actions);
+    return row;
+  };
+
+  incEl.replaceChildren(...filterDialogIncl.map(t => makeChip(t, 'inc')));
+  excEl.replaceChildren(...filterDialogExcl.map(t => makeChip(t, 'exc')));
+  unEl.replaceChildren(...unselected.map(t => makeChip(t, 'un')));
+}
+
+function wireAdvancedFilterDialog() {
+  const dlg = fsTagsFilterDialogEl();
+  if (!dlg) return;
+  fsFilterClearEl()?.addEventListener('click', () => {
+    filterDialogIncl = [];
+    filterDialogExcl = [];
+    renderAdvancedFilterDialog();
+  });
+  fsFilterCancelEl()?.addEventListener('click', () => {
+    dlg.close();
+  });
+  fsFilterConfirmEl()?.addEventListener('click', () => {
+    const next: TagFilter = {
+      include: filterDialogIncl.slice(),
+      exclude: filterDialogExcl.slice(),
+    };
+    prefs.graphTagFilter = next;
+    prefs.recentTagSets = pushRecentTagSet(prefs.recentTagSets, next);
+    savePrefs();
+    dlg.close();
+    renderAllFilterDependent();
+  });
+  dlg.addEventListener('close', () => {
+    if (filterDialogResolve) { filterDialogResolve(); filterDialogResolve = null; }
+  });
 }
 
 // ---------- Public API ----------

@@ -453,6 +453,10 @@
                 <option value="log">No clip (log Y)</option>
               </select>
             </label>
+            <label class="flex items-center gap-2">
+              <span>Tags:</span>
+              <select id="fs-tags-filter-menu" class="p-1 border border-gray-400 rounded bg-white dark:bg-gray-600 dark:text-white dark:border-gray-700 max-w-[20rem]"></select>
+            </label>
             <label class="flex items-center gap-1">
               <input type="checkbox" id="fs-graph-ao5" checked class="form-checkbox h-4 w-4 text-blue-600" />
               <span>Ao5</span>
@@ -616,11 +620,13 @@
             </div>
 
             <div>
-              <div class="flex items-center gap-1">
+              <div class="flex items-center gap-1 flex-wrap">
                 <div class="text-xs text-gray-500 dark:text-gray-400 mr-1">Scramble</div>
                 <button id="fs-new-scramble-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="New scramble." aria-label="New scramble.">🔀</button>
                 <button id="fs-copy-scramble-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="Copy scramble." aria-label="Copy scramble.">📑</button>
                 <button id="fs-paste-scramble-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="Paste scramble." aria-label="Paste scramble.">📋</button>
+                <button id="fs-pending-tags-btn" class="text-sm leading-none p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600" title="Tags for next solve." aria-label="Tags for next solve.">🏷️</button>
+                <span id="fs-pending-tags-display" class="text-xs text-gray-500 dark:text-gray-400"></span>
               </div>
               <div id="fs-scramble-display" class="font-mono text-base sm:text-lg break-words leading-relaxed"></div>
               <div id="fs-status" class="text-sm text-gray-600 dark:text-gray-300 min-h-[1.25rem] mt-1"></div>
@@ -841,6 +847,44 @@
     <p>Cubedex has been created with ♥ by <a href="https://twitter.com/pof" target="_blank" class="text-blue-500 hover:underline">Pau Oliva Fora</a> using <a href="https://github.com/poliva/smartcube-web-bluetooth" target="_blank" class="text-blue-500 hover:underline">smartcube-web-bluetooth</a> and <a href="https://github.com/cubing/cubing.js" target="_blank" class="text-blue-500 hover:underline">cubing.js</a>.</p>
     <p>The <a href="https://github.com/poliva/cubedex" target="_blank" class="text-blue-500 hover:underline">source code</a> is available on GitHub, feel free to contribute by sending a PR or <a href="https://ko-fi.com/cubedex" target="_blank" class="text-blue-500 hover:underline">buy me a coffee</a>.</p>
   </div>
+  <!-- Tag editor dialog (used by pre-solve tag button + per-row tag button). -->
+  <dialog id="fs-tag-editor-dialog" class="rounded-lg p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 backdrop:bg-black/40 min-w-[280px] max-w-[420px]">
+    <div class="font-semibold text-sm mb-2" id="fs-tag-editor-title">Tags</div>
+    <div id="fs-tag-editor-selected" class="flex flex-wrap gap-1 mb-2 min-h-[1.5rem]"></div>
+    <input id="fs-tag-editor-input" type="text" autocomplete="off" placeholder="Add or filter tags…" class="w-full text-sm px-2 py-1 mb-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900" />
+    <div id="fs-tag-editor-list" class="max-h-40 overflow-y-auto text-sm mb-3 border border-gray-200 dark:border-gray-700 rounded"></div>
+    <div class="flex justify-end gap-2 text-sm">
+      <button id="fs-tag-editor-cancel" type="button" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">Cancel</button>
+      <button id="fs-tag-editor-confirm" type="button" class="px-2 py-1 rounded bg-blue-500 text-white hover:bg-blue-600">Save</button>
+    </div>
+  </dialog>
+
+  <!-- Advanced 3-column tag filter dialog. -->
+  <dialog id="fs-tags-filter-dialog" class="rounded-lg p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 backdrop:bg-black/40 min-w-[480px] max-w-[720px]">
+    <div class="font-semibold text-sm mb-3">Filter solves by tag</div>
+    <div class="grid grid-cols-3 gap-3 text-sm">
+      <div>
+        <div class="font-semibold mb-1 text-green-700 dark:text-green-300">Include</div>
+        <div id="fs-filter-include" class="min-h-[8rem] flex flex-col gap-1"></div>
+      </div>
+      <div>
+        <div class="font-semibold mb-1">All tags</div>
+        <div id="fs-filter-unselected" class="min-h-[8rem] flex flex-col gap-1"></div>
+      </div>
+      <div>
+        <div class="font-semibold mb-1 text-red-700 dark:text-red-300">Exclude</div>
+        <div id="fs-filter-exclude" class="min-h-[8rem] flex flex-col gap-1"></div>
+      </div>
+    </div>
+    <div class="flex justify-between mt-3 text-sm">
+      <button id="fs-filter-clear" type="button" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">Clear all</button>
+      <div class="flex gap-2">
+        <button id="fs-filter-cancel" type="button" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">Cancel</button>
+        <button id="fs-filter-confirm" type="button" class="px-2 py-1 rounded bg-blue-500 text-white hover:bg-blue-600">Apply</button>
+      </div>
+    </div>
+  </dialog>
+
   <script type="module" src="/src/index.ts"></script>
 
 </body>

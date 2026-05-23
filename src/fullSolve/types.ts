@@ -69,4 +69,9 @@ export interface SolveRecord {
   // record is otherwise incomplete (no explicit abort moment to point
   // to). CSV emits the timestamp on the `abort` row when present.
   abortedAtMs?: number;
+  // User-assigned labels. Always stored normalized (lowercase, trimmed,
+  // internal whitespace collapsed to single spaces) so equality is
+  // straightforward. Absent / empty array = untagged. Used by the
+  // graph tag filter and shown as chips on history rows.
+  tags?: string[];
 }
