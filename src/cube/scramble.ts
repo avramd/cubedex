@@ -3,7 +3,7 @@
 // requires a Kociemba-style solver, which cubing.js runs in a Worker —
 // avoided here because Vite's worker bundle pulls in DOM-touching code
 // from the main app and crashes with "document is not defined").
-export function generateRandomScramble3x3(length = 25): string {
+export function generateRandomScramble3x3(length = 20): string {
   const faces = ['U', 'D', 'L', 'R', 'F', 'B'];
   const suffixes = ['', "'", '2'];
   const moves: string[] = [];

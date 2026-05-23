@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { generateRandomScramble3x3 } from './scramble';
 
 describe('generateRandomScramble3x3', () => {
-  it('produces 25 moves by default', () => {
+  it('produces 20 moves by default (5 turn-groups of 4)', () => {
     const moves = generateRandomScramble3x3().split(/\s+/);
-    expect(moves).toHaveLength(25);
+    expect(moves).toHaveLength(20);
   });
 
   it('honors the requested length', () => {
