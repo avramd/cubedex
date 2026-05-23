@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyPauseMove, computePauseReversePath, isPauseMoveClickable,
+  computeRedundantBlocks, isRedundantIdx,
   type PauseState,
 } from './pauseModel';
 
+// Tests use opaque "facelet" labels (S0, S1, ...) — the module doesn't
+// inspect facelet structure, only equality, so any string works.
+
 function state(over: Partial<PauseState> = {}): PauseState {
+  const originalMoves = over.originalMoves ?? ['R', 'U', "R'", "U'"];
+  const originalStates = over.originalStates ?? ['S0', 'S1', 'S2', 'S3', 'S4'];
   return {
-    originalMoves: ['R', 'U', "R'", "U'"],
+    originalMoves,
+    originalStates,
+    redundantBlocks: over.redundantBlocks ?? [],
     frontier: 3,
     wayward: [],
     redoneSet: new Set<number>(),
@@ -15,148 +23,184 @@ function state(over: Partial<PauseState> = {}): PauseState {
   };
 }
 
-describe('classifyPauseMove — reverse', () => {
-  it('classifies inverse of frontier move as reverse and decrements frontier', () => {
-    const r = classifyPauseMove(state({ frontier: 3 }), 'U'); // invert of U'
-    expect(r.bucket).toBe('reverse');
-    expect(r.next.frontier).toBe(2);
-    expect(r.next.wayward).toEqual([]);
+describe('computeRedundantBlocks', () => {
+  it('returns empty for non-redundant solves', () => {
+    expect(computeRedundantBlocks(['A', 'B', 'C', 'D'])).toEqual([]);
   });
 
-  it('drops the previously-redone bookmark when reversing past it', () => {
-    const r = classifyPauseMove(state({ frontier: 3, redoneSet: new Set([3]) }), 'U');
-    expect(r.next.redoneSet.has(3)).toBe(false);
+  it('identifies a single redundant pair (R R\')', () => {
+    expect(computeRedundantBlocks(['A', 'B', 'A'])).toEqual([[0, 1]]);
   });
 
-  it('treats R2 as self-inverting when reversing', () => {
-    const r = classifyPauseMove(
-      state({ originalMoves: ['R', 'U2'], frontier: 1 }),
-      'U2',
-    );
-    expect(r.bucket).toBe('reverse');
-    expect(r.next.frontier).toBe(0);
+  it('picks the MAXIMAL block when a state recurs multiple times', () => {
+    expect(computeRedundantBlocks(['A', 'B', 'A', 'B', 'A'])).toEqual([[0, 3]]);
+  });
+
+  it('keeps a single block when a state recurs once and a non-redundant tail follows', () => {
+    expect(computeRedundantBlocks(['A', 'B', 'A', 'B'])).toEqual([[0, 1]]);
+  });
+
+  it('finds two distinct redundant blocks separated by a non-redundant move', () => {
+    expect(computeRedundantBlocks(['A', 'B', 'A', 'C', 'D', 'C'])).toEqual([[0, 1], [3, 4]]);
   });
 });
 
-describe('classifyPauseMove — redo', () => {
-  it('classifies the next original move as redo and increments frontier', () => {
-    const r = classifyPauseMove(state({ frontier: 1 }), "R'"); // originalMoves[2]
-    expect(r.bucket).toBe('redo');
+describe('classifyPauseMove — state matching', () => {
+  it('advances frontier when new state matches the next index', () => {
+    const s = state({ frontier: -1, originalStates: ['A', 'B', 'C'], originalMoves: ['m1', 'm2'] });
+    const r = classifyPauseMove(s, 'm1', 'B');
+    expect(r.bucket).toBe('on-path');
+    expect(r.next.frontier).toBe(0);
+    expect(r.next.redoneSet.has(0)).toBe(true);
+  });
+
+  it('jumps past a redundant block when state matches the post-block index', () => {
+    const s = state({
+      frontier: -1,
+      originalMoves: ['R', "R'", 'R'],
+      originalStates: ['A', 'B', 'A', 'B'],
+      redundantBlocks: [[0, 1]],
+    });
+    const r = classifyPauseMove(s, 'R', 'B');
     expect(r.next.frontier).toBe(2);
     expect(r.next.redoneSet.has(2)).toBe(true);
+    expect(r.next.redoneSet.has(0)).toBe(false);
+    expect(r.next.redoneSet.has(1)).toBe(false);
   });
 
-  it('does not classify as redo past the end of original', () => {
-    const r = classifyPauseMove(state({ frontier: 3 }), 'X');
-    expect(r.bucket).toBe('wayward-new');
-  });
-});
-
-describe('classifyPauseMove — wayward', () => {
-  it('a non-matching move with empty wayward starts wayward', () => {
-    const r = classifyPauseMove(state({ frontier: 3 }), 'F');
+  it('off-path move grows wayward', () => {
+    const s = state({
+      frontier: 1, originalMoves: ['R', 'U'], originalStates: ['A', 'B', 'C'],
+    });
+    const r = classifyPauseMove(s, 'F', 'X');
     expect(r.bucket).toBe('wayward-new');
     expect(r.next.wayward).toEqual(['F']);
-    expect(r.next.frontier).toBe(3);
+    expect(r.next.frontier).toBe(1);
   });
 
-  it('wayward-undo pops when move inverts the top of wayward', () => {
-    const r = classifyPauseMove(state({ wayward: ['F', 'B'] }), "B'");
+  it('wayward-undo pops when move inverts top AND new state is still off-path', () => {
+    const s = state({
+      frontier: 1,
+      originalMoves: ['R', 'U'], originalStates: ['A', 'B', 'C'],
+      wayward: ['F'],
+    });
+    const r = classifyPauseMove(s, "F'", 'Y');
     expect(r.bucket).toBe('wayward-undo');
-    expect(r.next.wayward).toEqual(['F']);
-  });
-
-  it('a non-undoing move while wayward non-empty EXTENDS wayward (not reverse)', () => {
-    // U inverts the original frontier U', BUT wayward is non-empty so we
-    // must not silently rewind underneath it.
-    const r = classifyPauseMove(state({ frontier: 3, wayward: ['F'] }), 'U');
-    expect(r.bucket).toBe('wayward-new');
-    expect(r.next.wayward).toEqual(['F', 'U']);
-    expect(r.next.frontier).toBe(3);
-  });
-
-  it('reverse only fires when wayward is empty', () => {
-    const r = classifyPauseMove(state({ frontier: 3, wayward: [] }), 'U');
-    expect(r.bucket).toBe('reverse');
-  });
-});
-
-describe('classifyPauseMove — does not mutate input', () => {
-  it('returns a new state without touching the original', () => {
-    const s = state({ frontier: 3, wayward: ['F'], redoneSet: new Set([1]) });
-    const snapshotWayward = [...s.wayward];
-    const r = classifyPauseMove(s, "F'");
-    expect(s.wayward).toEqual(snapshotWayward);
-    expect(s.redoneSet.has(1)).toBe(true); // original still has it
     expect(r.next.wayward).toEqual([]);
+  });
+
+  it('wayward auto-clears when the user lands back on the path', () => {
+    const s = state({
+      frontier: 1,
+      originalMoves: ['R', 'U'], originalStates: ['A', 'B', 'C'],
+      wayward: ['F', 'F2'],
+    });
+    const r = classifyPauseMove(s, 'anything', 'A');
+    expect(r.bucket).toBe('on-path');
+    expect(r.next.frontier).toBe(-1);
+    expect(r.next.wayward).toEqual([]);
+  });
+
+  it('walks backward when new state matches only a lower index', () => {
+    const s = state({ frontier: 2, originalStates: ['A', 'B', 'C', 'D'], originalMoves: ['m1', 'm2', 'm3'] });
+    const r = classifyPauseMove(s, "m3'", 'C');
+    expect(r.next.frontier).toBe(1);
+    expect(r.next.redoneSet.has(2)).toBe(false);
   });
 });
 
 describe('computePauseReversePath', () => {
-  it('returns empty when no target is set', () => {
+  it('returns empty with no target', () => {
     expect(computePauseReversePath(state({ targetIdx: null }))).toEqual([]);
   });
 
-  it('returns empty when frontier already equals target and no wayward', () => {
-    expect(computePauseReversePath(state({ frontier: 2, targetIdx: 2 }))).toEqual([]);
+  it('skips fully-contained redundant blocks in the revert range', () => {
+    const s = state({
+      frontier: 2,
+      targetIdx: -1,
+      originalMoves: ['R', "R'", 'U'],
+      originalStates: ['A', 'B', 'A', 'C'],
+      redundantBlocks: [[0, 1]],
+    });
+    expect(computePauseReversePath(s)).toEqual(["U'"]);
   });
 
-  it('walks back from frontier down to targetIdx + 1 in execution order', () => {
-    // originalMoves: [R, U, R', U']; frontier=3; target=0.
-    // To reach state-after-move-0: invert U' (→U), R' (→R), U (→U').
-    const r = computePauseReversePath(state({ frontier: 3, targetIdx: 0 }));
-    expect(r).toEqual(['U', 'R', "U'"]);
+  it('does NOT skip a redundant block that straddles the revert range', () => {
+    const s = state({
+      frontier: 2,
+      targetIdx: 0,
+      originalMoves: ['R', 'U', "U'", "R'"],
+      originalStates: ['A', 'B', 'C', 'B', 'A'],
+      redundantBlocks: [[0, 3]],
+    });
+    expect(computePauseReversePath(s)).toEqual(['U', "U'"]);
   });
 
-  it('undoes wayward first (LIFO) then walks back to target', () => {
-    const r = computePauseReversePath(state({
-      frontier: 3,
-      targetIdx: 2,
+  it('undoes wayward first then walks back', () => {
+    const s = state({
+      frontier: 2,
+      targetIdx: 1,
       wayward: ['F', 'B'],
-    }));
-    // wayward first: invert(B)→B', invert(F)→F'. Then frontier 3 only
-    // (down to targetIdx+1 = 3): invert(originalMoves[3] = U') → U.
-    expect(r).toEqual(["B'", "F'", 'U']);
-  });
-
-  it('returns empty when frontier has gone past the target (over-reversed)', () => {
-    expect(computePauseReversePath(state({ frontier: 0, targetIdx: 2 }))).toEqual([]);
+      originalMoves: ['R', 'U', "U'"],
+      originalStates: ['A', 'B', 'C', 'B'],
+    });
+    expect(computePauseReversePath(s)).toEqual(["B'", "F'", 'U']);
   });
 });
 
 describe('isPauseMoveClickable', () => {
   const s = state({ frontier: 2, redoneSet: new Set([1]) });
 
-  it('rejects indices forward of the frontier', () => {
+  it('rejects indices forward of frontier', () => {
     expect(isPauseMoveClickable(s, 3)).toBe(false);
   });
 
-  it('rejects indices in the redoneSet', () => {
+  it('rejects indices in redoneSet', () => {
     expect(isPauseMoveClickable(s, 1)).toBe(false);
   });
 
-  it('accepts indices at-or-behind frontier and not redone', () => {
+  it('accepts other in-range indices, including redundant ones', () => {
     expect(isPauseMoveClickable(s, 0)).toBe(true);
     expect(isPauseMoveClickable(s, 2)).toBe(true);
   });
 });
 
-describe('classifyPauseMove — integration: reverse-then-redo round trip', () => {
-  it('reverse then redo returns to the same frontier with redoneSet marking the move', () => {
-    let s = state({ frontier: 3, redoneSet: new Set<number>() });
-    s = classifyPauseMove(s, 'U').next;       // reverse: frontier 3→2
-    expect(s.frontier).toBe(2);
-    s = classifyPauseMove(s, "U'").next;      // redo:    frontier 2→3
-    expect(s.frontier).toBe(3);
-    expect(s.redoneSet.has(3)).toBe(true);
+describe('isRedundantIdx', () => {
+  it('reports true for indices inside any redundant block', () => {
+    const s = state({ redundantBlocks: [[0, 1], [3, 4]] });
+    expect(isRedundantIdx(s, 0)).toBe(true);
+    expect(isRedundantIdx(s, 1)).toBe(true);
+    expect(isRedundantIdx(s, 2)).toBe(false);
+    expect(isRedundantIdx(s, 3)).toBe(true);
+    expect(isRedundantIdx(s, 4)).toBe(true);
+    expect(isRedundantIdx(s, 5)).toBe(false);
   });
+});
 
-  it('reverse → wayward → wayward-undo restores reverse-state cleanly', () => {
-    let s = state({ frontier: 3 });
-    s = classifyPauseMove(s, 'U').next;       // reverse → frontier 2, wayward []
-    s = classifyPauseMove(s, 'F').next;       // wayward-new → wayward [F]
-    s = classifyPauseMove(s, "F'").next;      // wayward-undo → wayward []
-    expect(s.frontier).toBe(2);
+describe('classifyPauseMove — R2 reversal via any quarter-turn direction', () => {
+  it('R+R or R\'+R\' both bring the cube back to the start state', () => {
+    // Original: R R (=R2). States A → B → C. User at frontier=1
+    // (state C). To get back to state A, they can do R+R (same
+    // direction; intermediate state D is off-path) or R'+R'
+    // (intermediate state B is on-path). Either path ends at A.
+    const start = state({
+      frontier: 1,
+      originalMoves: ['R', 'R'],
+      originalStates: ['A', 'B', 'C'],
+    });
+
+    // Path 1: R + R — first R lands the cube on an off-path state D.
+    let s = classifyPauseMove(start, 'R', 'D').next;
+    expect(s.frontier).toBe(1);
+    expect(s.wayward).toEqual(['R']);
+    s = classifyPauseMove(s, 'R', 'A').next;
+    expect(s.frontier).toBe(-1);
     expect(s.wayward).toEqual([]);
+
+    // Path 2: R' + R' — both intermediates are on path.
+    let t = classifyPauseMove(start, "R'", 'B').next;
+    expect(t.frontier).toBe(0);
+    t = classifyPauseMove(t, "R'", 'A').next;
+    expect(t.frontier).toBe(-1);
   });
 });

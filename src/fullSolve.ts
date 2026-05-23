@@ -16,6 +16,7 @@ import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
 import {
   classifyPauseMove, computePauseReversePath, isPauseMoveClickable,
+  computeRedundantBlocks, isRedundantIdx,
   type PauseState,
 } from './fullSolve/pauseModel';
 import { historyToCsv } from './fullSolve/csvExport';
@@ -540,7 +541,8 @@ let pauseStartedAtMs = 0;
 // is the phaseSeq at pause entry (held to color each original move by
 // the phase it contributed to). See src/fullSolve/pauseModel.ts.
 let pauseState: PauseState = {
-  originalMoves: [], frontier: -1, wayward: [], redoneSet: new Set<number>(),
+  originalMoves: [], originalStates: [], redundantBlocks: [],
+  frontier: -1, wayward: [], redoneSet: new Set<number>(),
   targetIdx: null,
 };
 let pauseOriginalTurns: number[] = [];
@@ -979,8 +981,21 @@ function renderPausedSolveMoves(el: HTMLElement) {
     const span = document.createElement('span');
     span.className = `${moveClass(m)} fs-paused-move`;
     span.textContent = m;
+    const redundant = isRedundantIdx(pauseState, i);
     if (i > pauseState.frontier) {
+      // Forward of the frontier (currently un-applied). Greyed and
+      // non-interactive.
       span.classList.add('text-gray-400', 'dark:text-gray-500');
+    } else if (redundant) {
+      // Redundant move that's been applied (or skipped via state-jump).
+      // Grey it out so the user sees it's a no-op cycle; still
+      // clickable so they can target a moment inside the redundancy if
+      // they want to.
+      span.classList.add('text-gray-400', 'dark:text-gray-500', 'cursor-pointer');
+      span.addEventListener('click', () => onPausedMoveClick(i));
+      if (i === pauseState.targetIdx) {
+        span.classList.add('ring-2', 'ring-offset-1', 'rounded');
+      }
     } else {
       const color = phaseColorForIdx(i);
       if (color) span.style.color = color;
@@ -1102,8 +1117,9 @@ function resetSolveState() {
   phaseTimestamps = phaseSeq.map(() => null);
   phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
   pauseState = {
-    originalMoves: [], frontier: -1, wayward: [],
-    redoneSet: new Set<number>(), targetIdx: null,
+    originalMoves: [], originalStates: [], redundantBlocks: [],
+    frontier: -1, wayward: [], redoneSet: new Set<number>(),
+    targetIdx: null,
   };
   pauseOriginalTurns = [];
   pauseOriginalPhaseReached = [];
@@ -1218,10 +1234,15 @@ function startSolving() {
 function onSolveMove(move: string) {
   if (mode === 'paused') {
     // While paused, the cube has already been turned (fsOnPhysicalMove
-    // applies the move to myPattern regardless of mode). Run the move
-    // through the pause state machine so the UI tracks rewind / redo /
-    // wayward exploration; the new solveMoves are reconciled on resume.
-    pauseState = classifyPauseMove(pauseState, move).next;
+    // applies the move to myPattern regardless of mode). Feed the
+    // resulting facelets through the state-based classifier so the UI
+    // tracks rewind / redo / wayward exploration; the new solveMoves
+    // are reconciled on resume.
+    let facelets = '';
+    if (myPattern) {
+      try { facelets = patternToFacelets(myPattern); } catch { /* ignore */ }
+    }
+    pauseState = classifyPauseMove(pauseState, move, facelets).next;
     renderSolutionMoves();
     renderRetraceHint();
     return;
@@ -1346,11 +1367,14 @@ function togglePause() {
     mode = 'paused';
     pauseStartedAtMs = Date.now();
     cancelAnimationFrame(timerRafHandle);
-    // Snapshot the solve so the investigation surface has a stable
-    // reference. solveMoves / solveTurns / phaseReachedAtMoveIdx are
-    // reconciled at resume from pauseState + wayward.
+    // Snapshot the solve. The state list is computed by REWINDING the
+    // current pattern through inverse moves, which is exact and avoids
+    // having to track every intermediate state during the live solve.
+    const states = computeOriginalStates(solveMoves);
     pauseState = {
       originalMoves: solveMoves.slice(),
+      originalStates: states,
+      redundantBlocks: computeRedundantBlocks(states),
       frontier: solveMoves.length - 1,
       wayward: [],
       redoneSet: new Set<number>(),
@@ -1371,8 +1395,9 @@ function togglePause() {
     reconcileSolveAfterPause();
     // Drop the snapshot now that we've rebuilt the live state.
     pauseState = {
-      originalMoves: [], frontier: -1, wayward: [],
-      redoneSet: new Set<number>(), targetIdx: null,
+      originalMoves: [], originalStates: [], redundantBlocks: [],
+      frontier: -1, wayward: [], redoneSet: new Set<number>(),
+      targetIdx: null,
     };
     pauseOriginalTurns = [];
     pauseOriginalPhaseReached = [];
@@ -1424,6 +1449,33 @@ function reconcileSolveAfterPause() {
       }
     }
   }
+}
+
+// Build the originalStates list by rewinding `myPattern` through each
+// inverse move. Returns an array of `moves.length + 1` facelet strings:
+// states[0] = state at solve start; states[i] = state after moves[i-1].
+// Falls back to all-empty-strings if myPattern is null or any rewind
+// throws — the resulting pause UI degrades to wayward-only matching.
+function computeOriginalStates(moves: string[]): string[] {
+  if (!myPattern) return moves.map(() => '').concat(['']);
+  const states: string[] = new Array(moves.length + 1);
+  try {
+    let pat = myPattern;
+    states[moves.length] = patternToFacelets(pat);
+    for (let i = moves.length - 1; i >= 0; i--) {
+      pat = pat.applyMove(invertMoveTok(moves[i]));
+      states[i] = patternToFacelets(pat);
+    }
+    return states;
+  } catch {
+    return moves.map(() => '').concat(['']);
+  }
+}
+
+function invertMoveTok(m: string): string {
+  if (m.endsWith("'")) return m.slice(0, -1);
+  if (m.endsWith('2')) return m;
+  return m + "'";
 }
 
 // ---------- Graph ----------
