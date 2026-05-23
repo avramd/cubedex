@@ -1083,8 +1083,10 @@ async function newScramble() {
   deviationMoves = [];
   scrambleTargetFacelets = scramblePatternStack[scramblePatternStack.length - 1] || null;
   mode = 'scrambling';
+  // Abort stays disabled in scrambling mode — there's no run to abort
+  // yet. It re-enables on the scramble→inspection transition.
   const abortBtn = fsAbortBtnEl();
-  if (abortBtn) abortBtn.disabled = false;
+  if (abortBtn) abortBtn.disabled = true;
   renderScrambleDisplay();
   const startFacelets = patternToFacelets(start);
   if (!isSolved(startFacelets)) {
@@ -1133,9 +1135,63 @@ function resetSolveState() {
 }
 
 function abortSolve() {
-  // Discard the current run (not recorded) and queue a new scramble.
-  renderStatus('Run aborted — new scramble coming up…');
-  void newScramble();
+  // Stop the timer and discard the recording, but KEEP the same
+  // scramble loaded. The user can either reset their cube and retry
+  // the scramble, or solve the cube and re-scramble normally — the
+  // existing scramble-progress matching handles both cases purely
+  // from facelets.
+  if (mode === 'idle' || mode === 'scrambling' || mode === 'done') return;
+
+  cancelAnimationFrame(timerRafHandle);
+  if (inspectionTimeoutHandle !== null) {
+    clearTimeout(inspectionTimeoutHandle);
+    inspectionTimeoutHandle = null;
+  }
+  pausedAccumMs = 0;
+  pauseStartedAtMs = 0;
+  solveStartMs = 0;
+  solveEndMs = 0;
+  inspectionStartMs = 0;
+  inspectionAutoExpiredFlag = false;
+  solveMoves = [];
+  solveTurns = [];
+  solveF2lSplits = [];
+  f2lSlotsEverDone = 0;
+  detectedCrossFace = null;
+  phaseTimestamps = phaseSeq.map(() => null);
+  phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
+  pauseState = {
+    originalMoves: [], originalStates: [], redundantBlocks: [],
+    frontier: -1, wayward: [], redoneSet: new Set<number>(),
+    targetIdx: null,
+  };
+  pauseOriginalTurns = [];
+  pauseOriginalPhaseReached = [];
+
+  mode = 'scrambling';
+  scrambleProgress = 0;
+  halfwayActive = false;
+  deviationMoves = [];
+
+  // Sync scramble progress from the cube's actual facelets. Solved →
+  // progress 0. At scramble target → onScrambleComplete fires →
+  // mode='inspection' (rare, but harmless). Mid-solve → no stack
+  // match, progress stays 0 and deviation accumulates as user moves.
+  if (myPattern) {
+    try {
+      resolveScrambleProgressFromPattern(patternToFacelets(myPattern));
+    } catch { /* ignore */ }
+  }
+
+  const pauseBtn = fsPauseBtnEl();
+  if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = 'Pause'; }
+  const abortBtn = fsAbortBtnEl();
+  if (abortBtn) abortBtn.disabled = true;  // no run to abort while scrambling
+
+  renderTimer();
+  renderSolutionMoves();
+  renderRetraceHint();
+  renderStatus('Solve aborted — same scramble. Reset the cube to the scrambled state to retry.');
 }
 
 function onScrambleMove(move: string) {
@@ -2774,7 +2830,9 @@ function wireEvents() {
   });
 
   fsAbortBtnEl()?.addEventListener('click', () => {
-    if (mode === 'idle' || mode === 'done') return;
+    // Abort only applies to an active run; in 'scrambling' there's
+    // nothing to abort (button is also visually disabled there).
+    if (mode === 'idle' || mode === 'scrambling' || mode === 'done') return;
     abortSolve();
   });
 
