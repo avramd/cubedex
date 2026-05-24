@@ -3096,15 +3096,46 @@ function tagSetsEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
-// Drive the enabled state of the Add and Save buttons from the
-// current input value + diff between selected and initial.
+// Style a button as either the active default (blue) or a
+// secondary action (border). When disabled, primary buttons render
+// gray-bg via the `disabled:bg-gray-300` rule; secondary buttons
+// dim via opacity. Tailwind regenerates these utility classes at
+// build time as long as the source string contains them.
+const BUTTON_PRIMARY_CLASSES = ['bg-blue-500', 'text-white', 'hover:bg-blue-600', 'disabled:bg-gray-300', 'disabled:cursor-not-allowed'];
+const BUTTON_SECONDARY_CLASSES = ['border', 'border-gray-300', 'dark:border-gray-600', 'hover:bg-gray-100', 'dark:hover:bg-gray-700', 'disabled:opacity-40', 'disabled:cursor-not-allowed'];
+
+function setButtonRole(btn: HTMLButtonElement, role: 'primary' | 'secondary') {
+  for (const c of BUTTON_PRIMARY_CLASSES) btn.classList.remove(c);
+  for (const c of BUTTON_SECONDARY_CLASSES) btn.classList.remove(c);
+  const next = role === 'primary' ? BUTTON_PRIMARY_CLASSES : BUTTON_SECONDARY_CLASSES;
+  for (const c of next) btn.classList.add(c);
+}
+
+// Drive the enabled state AND the primary/secondary role of the Add
+// and Save buttons. Whichever is the active "default" (the action
+// Enter would trigger) renders as the blue primary button; the other
+// uses the secondary border treatment.
+//
+// Default-button priority:
+//   1. Add — whenever the input has text (i.e., a tag can be added).
+//   2. Save — when Add is inactive AND the selection has changed
+//      from the initial set.
 function refreshTagEditorButtons() {
   const input = fsTagEditorInputEl();
   const addBtn = fsTagEditorAddEl();
   const saveBtn = fsTagEditorConfirmEl();
   const hasInput = !!normalizeTag(input?.value ?? '');
-  if (addBtn) addBtn.disabled = !hasInput;
-  if (saveBtn) saveBtn.disabled = tagSetsEqual(tagEditorSelected, tagEditorInitial);
+  const hasChanges = !tagSetsEqual(tagEditorSelected, tagEditorInitial);
+  if (addBtn) {
+    addBtn.disabled = !hasInput;
+    // Add owns the default slot whenever it's enabled.
+    setButtonRole(addBtn, hasInput ? 'primary' : 'secondary');
+  }
+  if (saveBtn) {
+    saveBtn.disabled = !hasChanges;
+    // Save is primary only when Add isn't claiming the default slot.
+    setButtonRole(saveBtn, !hasInput ? 'primary' : 'secondary');
+  }
 }
 
 function renderTagEditorSelected() {
@@ -3227,7 +3258,15 @@ function wireTagEditorDialog() {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      addCurrentInputAsTag(input.value);
+      // Mirror the default-button rule: Add wins when it's enabled
+      // (input has text); otherwise fall back to Save (if enabled).
+      const addBtn = fsTagEditorAddEl();
+      const saveBtn = fsTagEditorConfirmEl();
+      if (addBtn && !addBtn.disabled) {
+        addCurrentInputAsTag(input.value);
+      } else if (saveBtn && !saveBtn.disabled) {
+        saveBtn.click();
+      }
     }
   });
 }

@@ -855,8 +855,12 @@
     <div id="fs-tag-editor-list" class="max-h-40 overflow-y-auto text-sm mb-3 border border-gray-200 dark:border-gray-700 rounded"></div>
     <div class="flex justify-end gap-2 text-sm">
       <button id="fs-tag-editor-cancel" type="button" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">Cancel</button>
-      <button id="fs-tag-editor-add" type="button" class="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
-      <button id="fs-tag-editor-confirm" type="button" class="px-2 py-1 rounded bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed">Save</button>
+      <!-- Primary/secondary styles are set dynamically: whichever of
+           Add/Save is the active "default" (Enter-triggered) action is
+           rendered as the blue primary button; the other gets the
+           secondary border treatment. -->
+      <button id="fs-tag-editor-add" type="button" class="px-2 py-1 rounded">Add</button>
+      <button id="fs-tag-editor-confirm" type="button" class="px-2 py-1 rounded">Save</button>
     </div>
   </dialog>
 
