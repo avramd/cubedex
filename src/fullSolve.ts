@@ -492,6 +492,7 @@ const fsTagEditorSelectedEl = () => $$('fs-tag-editor-selected');
 const fsTagEditorInputEl = () => $$<HTMLInputElement>('fs-tag-editor-input');
 const fsTagEditorListEl = () => $$('fs-tag-editor-list');
 const fsTagEditorCancelEl = () => $$<HTMLButtonElement>('fs-tag-editor-cancel');
+const fsTagEditorAddEl = () => $$<HTMLButtonElement>('fs-tag-editor-add');
 const fsTagEditorConfirmEl = () => $$<HTMLButtonElement>('fs-tag-editor-confirm');
 const fsTagsFilterDialogEl = () => $$<HTMLDialogElement>('fs-tags-filter-dialog');
 const fsFilterIncludeEl = () => $$('fs-filter-include');
@@ -2656,6 +2657,21 @@ function renderSolveList() {
     setFormattedMoves(scramble, r.scramble);
     row.appendChild(scramble);
 
+    // Tag chips for this solve. flex-shrink-0 so the chips display
+    // their natural width while the scramble column absorbs the
+    // squeeze. Empty when the solve has no tags.
+    const tagChips = document.createElement('div');
+    tagChips.className = 'flex items-center gap-1 flex-shrink-0';
+    if (r.tags && r.tags.length > 0) {
+      for (const t of r.tags) {
+        const chip = document.createElement('span');
+        chip.className = 'px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-[10px] sm:text-xs';
+        chip.textContent = t;
+        tagChips.appendChild(chip);
+      }
+    }
+    row.appendChild(tagChips);
+
     // Action icons: pack tightly with no inter-button gap; rely on px padding inside each.
     const actions = document.createElement('div');
     actions.className = 'flex items-center gap-0';
@@ -3046,23 +3062,46 @@ function renderAllFilterDependent() {
 // dialog's Cancel/Save handlers settle.
 let tagEditorResolve: ((tags: string[] | null) => void) | null = null;
 let tagEditorSelected: string[] = [];
+let tagEditorInitial: string[] = []; // snapshot at open, for has-changes detection
 
 function openTagEditor(initial: string[], title = 'Tags'): Promise<string[] | null> {
   const dlg = fsTagEditorDialogEl();
   if (!dlg) return Promise.resolve(null);
-  // If a previous open is still pending (shouldn't happen, but defensively)
-  // resolve it as a cancel before reusing the dialog.
   if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
   tagEditorSelected = initial.slice();
+  tagEditorInitial = initial.slice();
   const titleEl = fsTagEditorTitleEl();
   if (titleEl) titleEl.textContent = title;
   const input = fsTagEditorInputEl();
   if (input) input.value = '';
   renderTagEditorSelected();
   renderTagEditorList('');
+  refreshTagEditorButtons();
   dlg.showModal();
   if (input) input.focus();
   return new Promise<string[] | null>(resolve => { tagEditorResolve = resolve; });
+}
+
+// Sort-insensitive comparison: tag order within a solve is not
+// meaningful, so re-adding the same set in a different order doesn't
+// count as a change.
+function tagSetsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = a.slice().sort();
+  const sb = b.slice().sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
+// Drive the enabled state of the Add and Save buttons from the
+// current input value + diff between selected and initial.
+function refreshTagEditorButtons() {
+  const input = fsTagEditorInputEl();
+  const addBtn = fsTagEditorAddEl();
+  const saveBtn = fsTagEditorConfirmEl();
+  const hasInput = !!normalizeTag(input?.value ?? '');
+  if (addBtn) addBtn.disabled = !hasInput;
+  if (saveBtn) saveBtn.disabled = tagSetsEqual(tagEditorSelected, tagEditorInitial);
 }
 
 function renderTagEditorSelected() {
@@ -3081,6 +3120,7 @@ function renderTagEditorSelected() {
       tagEditorSelected = tagEditorSelected.filter(s => s !== t);
       renderTagEditorSelected();
       renderTagEditorList(fsTagEditorInputEl()?.value ?? '');
+      refreshTagEditorButtons();
     });
     chip.appendChild(x);
     el.appendChild(chip);
@@ -3115,9 +3155,13 @@ function addCurrentInputAsTag(value: string) {
   if (!t) return;
   if (!tagEditorSelected.includes(t)) tagEditorSelected.push(t);
   const input = fsTagEditorInputEl();
-  if (input) input.value = '';
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
   renderTagEditorSelected();
   renderTagEditorList('');
+  refreshTagEditorButtons();
 }
 
 function wireTagEditorDialog() {
@@ -3128,7 +3172,20 @@ function wireTagEditorDialog() {
     dlg.close();
     if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
   });
+  fsTagEditorAddEl()?.addEventListener('click', () => {
+    const i = fsTagEditorInputEl();
+    if (i) addCurrentInputAsTag(i.value);
+  });
   fsTagEditorConfirmEl()?.addEventListener('click', () => {
+    // Defensive: if there's uncommitted text in the input, fold it into
+    // the selection before saving. The button is already disabled when
+    // the selection equals the initial set; this just stops the rare
+    // case where the user typed something, didn't press Add, but did
+    // change the selection some other way (e.g. removed a chip).
+    if (fsTagEditorAddEl() && !fsTagEditorAddEl()!.disabled) {
+      const i = fsTagEditorInputEl();
+      if (i && normalizeTag(i.value)) addCurrentInputAsTag(i.value);
+    }
     dlg.close();
     if (tagEditorResolve) {
       tagEditorResolve(tagEditorSelected.slice());
@@ -3148,6 +3205,7 @@ function wireTagEditorDialog() {
     const typed = input.value;
     const filter = normalizeTag(typed) ?? '';
     renderTagEditorList(typed);
+    refreshTagEditorButtons();
     if (isBackspace || !filter) return;
     const counts = allTagsWithCounts(history);
     const matches = sortedTagsForDialog(counts, filter);
