@@ -501,6 +501,9 @@ const fsFilterExcludeEl = () => $$('fs-filter-exclude');
 const fsFilterClearEl = () => $$<HTMLButtonElement>('fs-filter-clear');
 const fsFilterCancelEl = () => $$<HTMLButtonElement>('fs-filter-cancel');
 const fsFilterConfirmEl = () => $$<HTMLButtonElement>('fs-filter-confirm');
+const fsFilterMoveIncludeEl = () => $$<HTMLButtonElement>('fs-filter-move-include');
+const fsFilterMoveUnselectedEl = () => $$<HTMLButtonElement>('fs-filter-move-unselected');
+const fsFilterMoveExcludeEl = () => $$<HTMLButtonElement>('fs-filter-move-exclude');
 // Full Solve renders into the same large graphing area training mode uses.
 const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('statsGraph');
 const algStatsEl = () => $$('alg-stats');
@@ -3292,18 +3295,43 @@ async function onTagsFilterMenuChange(value: string) {
 
 // --- Advanced filter dialog (3 columns) ------------------------------
 
+type FilterColumn = 'inc' | 'un' | 'exc';
+
 let filterDialogIncl: string[] = [];
 let filterDialogExcl: string[] = [];
 let filterDialogResolve: (() => void) | null = null;
+// The currently-selected tag (any column) — click a chip to select it,
+// click it again to deselect. The header + buttons in other columns
+// become enabled while a tag is selected.
+let filterDialogSelected: string | null = null;
 
 function openAdvancedFilterDialog(): Promise<void> {
   const dlg = fsTagsFilterDialogEl();
   if (!dlg) return Promise.resolve();
   filterDialogIncl = prefs.graphTagFilter.include.slice();
   filterDialogExcl = prefs.graphTagFilter.exclude.slice();
+  filterDialogSelected = null;
   renderAdvancedFilterDialog();
   dlg.showModal();
   return new Promise<void>(resolve => { filterDialogResolve = resolve; });
+}
+
+// Where does a tag live right now? Used both for + button enablement
+// (must be a different column than the one offering the move) and for
+// the drag-and-drop "no-op when dropped on its own column" case.
+function columnOfTag(tag: string): FilterColumn {
+  if (filterDialogIncl.includes(tag)) return 'inc';
+  if (filterDialogExcl.includes(tag)) return 'exc';
+  return 'un';
+}
+
+function moveTagToColumn(tag: string, target: FilterColumn) {
+  filterDialogIncl = filterDialogIncl.filter(t => t !== tag);
+  filterDialogExcl = filterDialogExcl.filter(t => t !== tag);
+  if (target === 'inc') filterDialogIncl.push(tag);
+  else if (target === 'exc') filterDialogExcl.push(tag);
+  // 'un' is implicit — not in either list.
+  renderAdvancedFilterDialog();
 }
 
 function renderAdvancedFilterDialog() {
@@ -3315,46 +3343,46 @@ function renderAdvancedFilterDialog() {
   const allTags = Array.from(counts.keys()).sort();
   const unselected = allTags.filter(t => !filterDialogIncl.includes(t) && !filterDialogExcl.includes(t));
 
-  const makeChip = (tag: string, column: 'inc' | 'un' | 'exc') => {
-    const row = document.createElement('div');
-    row.className = 'flex items-center justify-between px-2 py-1 rounded border border-gray-200 dark:border-gray-700 text-xs';
-    const label = document.createElement('span');
-    label.textContent = tag;
-    row.appendChild(label);
-    const actions = document.createElement('div');
-    actions.className = 'flex gap-1';
-    const mkBtn = (text: string, title: string, onClick: () => void) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = text;
-      b.title = title;
-      b.className = 'leading-none px-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700';
-      b.addEventListener('click', onClick);
-      return b;
-    };
-    const removeFromAll = () => {
-      filterDialogIncl = filterDialogIncl.filter(t => t !== tag);
-      filterDialogExcl = filterDialogExcl.filter(t => t !== tag);
-    };
-    if (column === 'un') {
-      actions.appendChild(mkBtn('+ Include', 'Move to Include', () => {
-        removeFromAll(); filterDialogIncl.push(tag); renderAdvancedFilterDialog();
-      }));
-      actions.appendChild(mkBtn('− Exclude', 'Move to Exclude', () => {
-        removeFromAll(); filterDialogExcl.push(tag); renderAdvancedFilterDialog();
-      }));
-    } else {
-      actions.appendChild(mkBtn('Remove', 'Move back to All tags', () => {
-        removeFromAll(); renderAdvancedFilterDialog();
-      }));
-    }
-    row.appendChild(actions);
-    return row;
+  const makeChip = (tag: string) => {
+    const chip = document.createElement('div');
+    const selected = filterDialogSelected === tag;
+    chip.className = `flex items-center px-2 py-1 rounded border text-xs cursor-pointer select-none ${
+      selected
+        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900 ring-2 ring-blue-400'
+        : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700'
+    }`;
+    chip.draggable = true;
+    chip.textContent = tag;
+    chip.addEventListener('click', () => {
+      filterDialogSelected = filterDialogSelected === tag ? null : tag;
+      renderAdvancedFilterDialog();
+    });
+    chip.addEventListener('dragstart', (e) => {
+      filterDialogSelected = tag;
+      if (e.dataTransfer) {
+        e.dataTransfer.setData('text/plain', tag);
+        e.dataTransfer.effectAllowed = 'move';
+      }
+    });
+    return chip;
   };
 
-  incEl.replaceChildren(...filterDialogIncl.map(t => makeChip(t, 'inc')));
-  excEl.replaceChildren(...filterDialogExcl.map(t => makeChip(t, 'exc')));
-  unEl.replaceChildren(...unselected.map(t => makeChip(t, 'un')));
+  incEl.replaceChildren(...filterDialogIncl.map(makeChip));
+  excEl.replaceChildren(...filterDialogExcl.map(makeChip));
+  unEl.replaceChildren(...unselected.map(makeChip));
+
+  // + buttons: enabled only when a tag is selected AND it currently
+  // lives in a DIFFERENT column. (Moving a tag to its current column
+  // would be a no-op.)
+  const selected = filterDialogSelected;
+  const sourceCol = selected ? columnOfTag(selected) : null;
+  const setMoveBtn = (btn: HTMLButtonElement | null, col: FilterColumn) => {
+    if (!btn) return;
+    btn.disabled = !selected || sourceCol === col;
+  };
+  setMoveBtn(fsFilterMoveIncludeEl(), 'inc');
+  setMoveBtn(fsFilterMoveUnselectedEl(), 'un');
+  setMoveBtn(fsFilterMoveExcludeEl(), 'exc');
 }
 
 function wireAdvancedFilterDialog() {
@@ -3363,6 +3391,7 @@ function wireAdvancedFilterDialog() {
   fsFilterClearEl()?.addEventListener('click', () => {
     filterDialogIncl = [];
     filterDialogExcl = [];
+    filterDialogSelected = null;
     renderAdvancedFilterDialog();
   });
   fsFilterCancelEl()?.addEventListener('click', () => {
@@ -3379,6 +3408,38 @@ function wireAdvancedFilterDialog() {
     dlg.close();
     renderAllFilterDependent();
   });
+
+  // + button per column: move the selected tag here. The buttons are
+  // disabled in renderAdvancedFilterDialog whenever the move would be
+  // a no-op (no selection / same column).
+  const wireMove = (btn: HTMLButtonElement | null, target: FilterColumn) => {
+    btn?.addEventListener('click', () => {
+      if (filterDialogSelected) moveTagToColumn(filterDialogSelected, target);
+    });
+  };
+  wireMove(fsFilterMoveIncludeEl(), 'inc');
+  wireMove(fsFilterMoveUnselectedEl(), 'un');
+  wireMove(fsFilterMoveExcludeEl(), 'exc');
+
+  // Drag-and-drop targets: each column accepts drops of any chip.
+  const wireDrop = (el: HTMLElement | null, target: FilterColumn) => {
+    if (!el) return;
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const tag = e.dataTransfer?.getData('text/plain') ?? '';
+      if (!tag) return;
+      if (columnOfTag(tag) === target) return;  // no-op
+      moveTagToColumn(tag, target);
+    });
+  };
+  wireDrop(fsFilterIncludeEl(), 'inc');
+  wireDrop(fsFilterUnselectedEl(), 'un');
+  wireDrop(fsFilterExcludeEl(), 'exc');
+
   dlg.addEventListener('close', () => {
     if (filterDialogResolve) { filterDialogResolve(); filterDialogResolve = null; }
   });
