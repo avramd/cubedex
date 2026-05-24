@@ -3255,18 +3255,24 @@ function wireTagEditorDialog() {
     }
   });
 
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      // Mirror the default-button rule: Add wins when it's enabled
-      // (input has text); otherwise fall back to Save (if enabled).
-      const addBtn = fsTagEditorAddEl();
-      const saveBtn = fsTagEditorConfirmEl();
-      if (addBtn && !addBtn.disabled) {
-        addCurrentInputAsTag(input.value);
-      } else if (saveBtn && !saveBtn.disabled) {
-        saveBtn.click();
-      }
+  // Enter triggers the active default button regardless of where
+  // focus currently is inside the dialog (input, body, etc.). The
+  // listener is on the dialog itself so it catches keydown via
+  // bubbling. We skip the action when the focused element is itself
+  // a button — pressing Enter on a focused button already triggers
+  // its native click, so handling it again would double-fire.
+  dlg.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const focused = (e.target as HTMLElement | null)?.tagName;
+    if (focused === 'BUTTON') return;
+    e.preventDefault();
+    const addBtn = fsTagEditorAddEl();
+    const saveBtn = fsTagEditorConfirmEl();
+    if (addBtn && !addBtn.disabled) {
+      const i = fsTagEditorInputEl();
+      if (i) addCurrentInputAsTag(i.value);
+    } else if (saveBtn && !saveBtn.disabled) {
+      saveBtn.click();
     }
   });
 }
