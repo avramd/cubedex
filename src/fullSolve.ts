@@ -3256,15 +3256,20 @@ function wireTagEditorDialog() {
   });
 
   // Enter triggers the active default button regardless of where
-  // focus currently is inside the dialog (input, body, etc.). The
-  // listener is on the dialog itself so it catches keydown via
-  // bubbling. We skip the action when the focused element is itself
-  // a button — pressing Enter on a focused button already triggers
-  // its native click, so handling it again would double-fire.
-  dlg.addEventListener('keydown', (e) => {
+  // focus currently lives. The listener has to be at the document
+  // level (not dialog level) to catch the case where the focused
+  // element gets removed by a re-render — at that point the browser
+  // moves focus to <body>, which is OUTSIDE the dialog's subtree, so
+  // a dialog-bound listener would never fire. The `dlg.open` check
+  // scopes us to "tag editor is currently open" so this doesn't
+  // intercept Enter anywhere else on the page.
+  document.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
-    const focused = (e.target as HTMLElement | null)?.tagName;
-    if (focused === 'BUTTON') return;
+    if (!dlg.open) return;
+    const target = e.target as HTMLElement | null;
+    // Let native click fire when Enter is pressed on a focused
+    // button inside this dialog (would otherwise double-fire).
+    if (target && target.tagName === 'BUTTON' && dlg.contains(target)) return;
     e.preventDefault();
     const addBtn = fsTagEditorAddEl();
     const saveBtn = fsTagEditorConfirmEl();
