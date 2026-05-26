@@ -49,6 +49,26 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
     case 'eoll': return (p.eoll ?? 0);
     case 'epll': return (p.epll ?? p.pll ?? 0);
     case 'cpll': return (p.cpll ?? 0);
+    // Roux's CMLL aggregate prefers the split (ocll + opll) when
+    // present; falls back to the unsplit `cmll` field. Mirrors OLL/PLL.
+    case 'cmll': {
+      const split = (p.ocll ?? 0) + (p.opll ?? 0);
+      return split > 0 ? split : (p.cmll ?? 0);
+    }
+    // OPLL absorbs the CMLL aggregate when only the aggregate is stored
+    // (mirrors OCLL absorbing OLL): puts the whole CMLL band at the
+    // higher-stacked position when displayed split.
+    case 'opll': return (p.opll ?? p.cmll ?? 0);
+    // Roux's LSE aggregate prefers the 3-way split (lseo + lre + opme)
+    // when present; falls back to the unsplit `lse` field.
+    case 'lse': {
+      const split = (p.lseo ?? 0) + (p.lre ?? 0) + (p.opme ?? 0);
+      return split > 0 ? split : (p.lse ?? 0);
+    }
+    case 'lseo': return (p.lseo ?? 0);
+    case 'lre':  return (p.lre ?? 0);
+    // OPME (3rd LSE sub-phase) absorbs LSE aggregate when displayed split.
+    case 'opme': return (p.opme ?? p.lse ?? 0);
     default:     return p[displayKey] ?? 0;
   }
 }

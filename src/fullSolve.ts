@@ -651,44 +651,65 @@ function currentPhaseSequence(): PhaseDef[] {
   ];
 }
 
-// What the legend and stacked-area graph show. Collapses EOLL+OCLL into
-// a single OLL band (and CPLL+EPLL into PLL) when the respective 2-look
-// toggle is off, taking the higher-stacked subphase's color so the
-// aggregate visually matches the top of the split stack.
-function displayPhaseSequence(): PhaseDef[] {
-  const seq = currentPhaseSequence();
-  if (prefs.process === 'beginner') return seq;
-  const out: PhaseDef[] = [];
-  for (let i = 0; i < seq.length; i++) {
-    const p = seq[i];
-    // CFOP + F3uL: same 2-look OLL / 2-look PLL collapse rules.
-    if (!prefs.twoLookOll && p.key === 'eoll' && seq[i + 1]?.key === 'ocll') {
-      out.push({ key: 'oll', label: 'OLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
-      i++;
-      continue;
-    }
-    if (!prefs.twoLookPll && p.key === 'cpll' && seq[i + 1]?.key === 'epll') {
-      out.push({ key: 'pll', label: 'PLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
-      i++;
-      continue;
-    }
-    // Roux: 2-look CMLL collapses OCLL+OPLL → CMLL.
-    if (prefs.process === 'roux' && !prefs.twoLookCmll
-        && p.key === 'ocll' && seq[i + 1]?.key === 'opll') {
-      out.push({ key: 'cmll', label: 'CMLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
-      i++;
-      continue;
-    }
-    // Roux: 3-look LSE collapses LSEO+LRE+OPME → LSE.
-    if (prefs.process === 'roux' && !prefs.threeLookLse
-        && p.key === 'lseo' && seq[i + 1]?.key === 'lre' && seq[i + 2]?.key === 'opme') {
-      out.push({ key: 'lse', label: 'LSE', predicate: seq[i + 2].predicate, color: seq[i + 2].color });
-      i += 2;
-      continue;
-    }
-    out.push(p);
+// Canonical solve-progression order for ALL phase keys across every
+// process. The graph + legend use this to build a unified key order
+// when the filtered history mixes multiple processes — each record
+// contributes only to the keys in its own `displayPhaseSequenceFor`
+// list, so per-solve totals stay correct. Order: setup-equivalents,
+// then F2L-equivalents, then OLL/CMLL phase (splits before
+// aggregates, lower-stacked sub-phase first), then PLL/LSE phase
+// (same), then the Beginner aggregate at the very top.
+const CANONICAL_KEY_ORDER: readonly string[] = [
+  'setup', 'cross', 'f1b',
+  'f2l', 'f2b', 'fml',
+  // OLL/CMLL phase
+  'eoll',
+  'ocll',
+  'oll',
+  'opll',
+  'cmll',
+  // PLL/LSE phase
+  'cpll',
+  'lseo',
+  'lre',
+  'epll',
+  'opme',
+  'pll',
+  'lse',
+  'll',
+];
+
+// Per-record display key sequence — what bands a single record
+// contributes to. Uses CURRENT global prefs for the split/aggregate
+// choice, so toggling 2-look from the UI restacks every solve
+// uniformly. Roux records honor twoLookCmll/threeLookLse; CFOP/F3uL
+// records honor twoLookOll/twoLookPll.
+function displayPhaseSequenceFor(r: SolveRecord): string[] {
+  if (r.process === 'beginner') return ['setup', 'll'];
+  if (r.process === 'roux') {
+    const oll = prefs.twoLookCmll ? ['ocll', 'opll'] : ['cmll'];
+    const lse = prefs.threeLookLse ? ['lseo', 'lre', 'opme'] : ['lse'];
+    return ['f1b', 'f2b', ...oll, ...lse];
   }
-  return out;
+  if (r.process === 'f3ul') {
+    const oll = prefs.twoLookOll ? ['eoll', 'ocll'] : ['oll'];
+    const pll = prefs.twoLookPll ? ['cpll', 'epll'] : ['pll'];
+    return ['f1b', 'f2b', 'fml', ...oll, ...pll];
+  }
+  // cfop
+  const oll = prefs.twoLookOll ? ['eoll', 'ocll'] : ['oll'];
+  const pll = prefs.twoLookPll ? ['cpll', 'epll'] : ['pll'];
+  return ['cross', 'f2l', ...oll, ...pll];
+}
+
+// Union of every key any record in `records` would display, ordered
+// per CANONICAL_KEY_ORDER. Used as the stacked-area chart's dataset
+// order. Roux's LRE/OPME/LSEO bands "come and go" automatically: they
+// only appear when a Roux solve with split LSE is in the filtered view.
+function unifiedKeyOrder(records: SolveRecord[]): string[] {
+  const seen = new Set<string>();
+  for (const r of records) for (const k of displayPhaseSequenceFor(r)) seen.add(k);
+  return CANONICAL_KEY_ORDER.filter(k => seen.has(k));
 }
 
 // ---------- DOM refs ----------
@@ -1009,16 +1030,23 @@ const TRAINING_STATS_LEGEND_HTML = `
 `.trim();
 
 function renderStatsLegend() {
-  // Build a per-phase legend that matches the stacked-area dataset colors
-  // currently in `phaseSeq`. Trendlines (Ao5/Ao12) get appended.
+  // Build a per-phase legend that matches the stacked-area dataset
+  // colors actually in the graph. Cross-process: uses the same
+  // unifiedKeyOrder as the graph, so the legend shows exactly the
+  // phases visible in the current view (Roux's LRE band appears when
+  // Roux solves are in scope, vanishes otherwise). Trendlines
+  // (Ao5/Ao12) get appended.
   const el = statsLegendEl();
   if (!el) return;
   const items: string[] = [];
-  displayPhaseSequence().forEach((p) => {
+  const keys = unifiedKeyOrder(filteredHistory());
+  keys.forEach((k) => {
+    const baseColor = PHASE_COLOR_BY_KEY[k] ?? PHASE_COLORS[0];
     // Legend swatches use the phase's hue at full opacity (regardless of
     // the band's stacked-area alpha). Match-and-replace the alpha value.
-    const color = p.color.replace(/,\s*[\d.]+\)\s*$/, ', 1)');
-    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${p.label}</span>`);
+    const color = baseColor.replace(/,\s*[\d.]+\)\s*$/, ', 1)');
+    const label = PHASE_KEY_LABELS[k] ?? k;
+    items.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background-color:${color};flex-shrink:0"></span>${label}</span>`);
   });
   const isDark = document.documentElement.classList.contains('dark');
   const ao5Color = isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)';
@@ -1868,16 +1896,18 @@ function renderGraph() {
     if (graphChart) { graphChart.destroy(); graphChart = null; }
     return;
   }
-  // The graph reflects the CURRENT phase sequence only — so 2-look modes
-  // hide the combined 'oll'/'pll' labels even if past solves recorded them
-  // and vice versa. Solves that lack a key default to 0 duration (the band
-  // for that phase sits on top of the band below).
+  // The graph builds its key order from the UNION of phase keys present
+  // in the filtered slice, in canonical solve-progression order. This
+  // lets CFOP, F3uL, Roux, and Beginner solves all stack correctly in
+  // the same chart — each solve contributes only to the keys in its
+  // own displayPhaseSequenceFor list (see the per-record gate in the
+  // cumulative loop below), so totals stay accurate per solve.
   //
-  // When the "F2L slots" toggle is on, expand the F2L key into 4 sub-band
-  // keys (f2l_1..f2l_4) so each renders as a separately-coloured stacked
-  // band. phaseMsForDisplay handles the per-record split using r.f2lSplits.
-  const displaySeq = displayPhaseSequence();
-  let keyOrder = displaySeq.map(p => p.key);
+  // When the "F2L slots" toggle is on, expand the F2L key into 4 sub-
+  // band keys (f2l_1..f2l_4) so each renders as a separately-coloured
+  // stacked band. phaseMsForDisplay handles the per-record split using
+  // r.f2lSplits; non-CFOP records have no f2l data so render as 0.
+  let keyOrder = unifiedKeyOrder(slice);
   if (prefs.f2lSplits) {
     const fIdx = keyOrder.indexOf('f2l');
     if (fIdx >= 0) {
@@ -1888,6 +1918,9 @@ function renderGraph() {
       ];
     }
   }
+  // Precompute each solve's allowed key set so the cumulative loop can
+  // gate contributions without recomputing per (solve, key) pair.
+  const sliceKeySets: Array<Set<string>> = slice.map(r => new Set(displayPhaseSequenceFor(r)));
   // Phase-focus: when set, the graph hides every band outside the focused
   // group (F2L or LL) and re-baselines the remaining bands from zero, so
   // the user can inspect just that phase's variation without the rest of
@@ -1898,7 +1931,7 @@ function renderGraph() {
       // Focus group has no representative keys for this configuration —
       // bail back to the unfocused view.
       focusedPhaseGroup = null;
-      keyOrder = displaySeq.map(p => p.key);
+      keyOrder = unifiedKeyOrder(slice);
     } else {
       // Insert an "idle:<phase>" key BEFORE each phase key. The idle
       // dataset gets the same `tension: 0.15` smoothing as the bands, so
@@ -1927,8 +1960,9 @@ function renderGraph() {
       // (PHASE_COLORS[1] itself uses 0.75 to match the topmost sub-band.)
       return PHASE_COLORS[1].replace(/,\s*[\d.]+\)\s*$/, `, ${a})`);
     }
-    const def = displaySeq.find(p => p.key === k);
-    return def?.color ?? PHASE_COLORS[0];
+    // Cross-process color lookup via the global key→color map (covers
+    // every process's keys, not just the current one).
+    return PHASE_COLOR_BY_KEY[k] ?? PHASE_COLORS[0];
   };
   const labelForKey = (k: string): string => {
     if (k.startsWith('f2l_')) {
@@ -1954,8 +1988,29 @@ function renderGraph() {
   const cumulative: number[][] = slice.map(() => []);
   slice.forEach((r, solveIdx) => {
     let acc = 0;
+    const allowed = sliceKeySets[solveIdx];
+    // For F2L sub-bands, the record's allowed-key check is on 'f2l'.
+    const allowsKey = (k: string) => {
+      if (k.startsWith('idle:')) k = k.slice(5);
+      if (k.startsWith('f2l_'))  return allowed.has('f2l');
+      return allowed.has(k);
+    };
     for (const k of keyOrder) {
-      let segmentMs: number;
+      let segmentMs = 0;
+      // Per-record gate: a record only contributes to keys in its own
+      // displayPhaseSequenceFor list (plus the f2l_* sub-bands when its
+      // own seq has 'f2l'). Without this gate, a Roux record whose
+      // seq is {f1b, f2b, cmll, lse} would still contribute its stored
+      // `ocll` value to the 'ocll' band in keyOrder (added by a CFOP
+      // record's seq) — and the same time would also flow into 'cmll'
+      // via aggregation, double-counting.
+      if (!allowsKey(k)) {
+        // Keep cumulative in lock-step with keyOrder by pushing the
+        // unchanged accumulator. Zero contribution still produces a
+        // dataset cell at this stack position.
+        cumulative[solveIdx].push(acc);
+        continue;
+      }
       if (k.startsWith('idle:')) {
         const phaseKey = k.slice(5);
         const totalMs = phaseMsForDisplay(r, phaseKey);
@@ -2049,8 +2104,13 @@ function renderGraph() {
   // bands instead of the whole solve.
   const recordTotalSec = (r: SolveRecord): number => {
     if (!focusedPhaseGroup) return r.totalMs / 1000;
+    const allowed = new Set(displayPhaseSequenceFor(r));
     let sum = 0;
-    for (const k of keyOrder) sum += phaseMsForDisplay(r, k);
+    for (const k of keyOrder) {
+      const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+      if (!allowed.has(baseKey)) continue;
+      sum += phaseMsForDisplay(r, k);
+    }
     return sum / 1000;
   };
   const totals = slice.map(recordTotalSec);
@@ -2248,13 +2308,23 @@ function renderGraph() {
         let totalSec: number;
         if (focusedPhaseGroup === 'f2l') {
           totalLabel = 'F2L';
+          const allowed = new Set(displayPhaseSequenceFor(r));
           let sumMs = 0;
-          for (const k of keyOrder) sumMs += phaseMsForDisplay(r, k);
+          for (const k of keyOrder) {
+            const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+            if (!allowed.has(baseKey)) continue;
+            sumMs += phaseMsForDisplay(r, k);
+          }
           totalSec = sumMs / 1000;
         } else if (focusedPhaseGroup === 'll') {
           totalLabel = 'LL';
+          const allowed = new Set(displayPhaseSequenceFor(r));
           let sumMs = 0;
-          for (const k of keyOrder) sumMs += phaseMsForDisplay(r, k);
+          for (const k of keyOrder) {
+            const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+            if (!allowed.has(baseKey)) continue;
+            sumMs += phaseMsForDisplay(r, k);
+          }
           totalSec = sumMs / 1000;
         } else {
           totalLabel = 'Solve';
