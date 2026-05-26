@@ -290,6 +290,125 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+// Replay the recorded solve under a TARGET process's phase sequence
+// and produce a fresh phase-durations map. Used by the post-hoc
+// method-edit feature: when the user picks the wrong process at
+// solve time (or wants to retag a solve as a different method), we
+// re-walk the solution against the new process's predicates to
+// derive the phase breakdown.
+//
+// Phase detection follows the same first-match-wins discipline the
+// live recorder uses, but uses pure predicates with locally-scoped
+// face-detection state (so this doesn't disturb the active solve).
+//
+// Returns null if the puzzle engine isn't available or the record
+// lacks per-turn timestamps. Phases that never fire are simply
+// absent from the returned map — the graph + CSV handle missing
+// keys as zero.
+function replayPhasesForProcess(r: SolveRecord, targetProcess: Process): Record<string, number> | null {
+  if (!kpuzzle) return null;
+  if (!r.turns || r.turns.length === 0) return null;
+  let pat = kpuzzle.defaultPattern();
+  for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
+    try { pat = pat.applyMove(m); } catch { return null; }
+  }
+  const tokens = r.solution.split(/\s+/).filter(Boolean);
+
+  // Locally-scoped face detection — each replay starts fresh.
+  let crossFace: Face | null = null;
+  let downFace: Face | null = null;
+  let side1Face: Face | null = null;
+
+  type ReplayCheck = { key: string; check: (f: string) => boolean };
+  const phaseChecks: ReplayCheck[] = (() => {
+    if (targetProcess === 'beginner') {
+      return [
+        { key: 'setup', check: (f: string) => {
+          for (const face of FACES) if (isEOLLDoneOn(face, f)) return true;
+          return false;
+        }},
+        { key: 'll', check: (f: string) => isSolved(f) },
+      ];
+    }
+    if (targetProcess === 'roux') {
+      return [
+        { key: 'f1b', check: (f: string) => {
+          if (downFace && side1Face) return isRouxFirstBlockDoneOn(downFace, side1Face, f);
+          for (const d of FACES) for (const s of FACES) {
+            if (s === d || s === OPPOSITE[d]) continue;
+            if (isRouxFirstBlockDoneOn(d, s, f)) { downFace = d; side1Face = s; return true; }
+          }
+          return false;
+        }},
+        { key: 'f2b',  check: (f: string) => !!(downFace && side1Face) && isRouxSecondBlockDoneOn(downFace!, side1Face!, f) },
+        { key: 'ocll', check: (f: string) => !!downFace && areTopCornersOrientedOn(downFace!, f) },
+        { key: 'opll', check: (f: string) => !!downFace && areTopCornersOrientedOn(downFace!, f) && isHeadlightsDoneOn(downFace!, f) },
+        { key: 'lseo', check: (f: string) => !!(downFace && side1Face) && isLSEOrientedOn(downFace!, side1Face!, f) },
+        { key: 'lre',  check: (f: string) => !!(downFace && side1Face) && isLREDoneOn(downFace!, side1Face!, f) },
+        { key: 'opme', check: (f: string) => isSolved(f) },
+      ];
+    }
+    if (targetProcess === 'f3ul') {
+      return [
+        { key: 'f1b', check: (f: string) => {
+          if (downFace && side1Face) return isRouxFirstBlockDoneOn(downFace, side1Face, f);
+          for (const d of FACES) for (const s of FACES) {
+            if (s === d || s === OPPOSITE[d]) continue;
+            if (isRouxFirstBlockDoneOn(d, s, f)) { downFace = d; side1Face = s; return true; }
+          }
+          return false;
+        }},
+        { key: 'f2b',  check: (f: string) => !!(downFace && side1Face) && isRouxSecondBlockDoneOn(downFace!, side1Face!, f) },
+        { key: 'fml',  check: (f: string) => !!downFace && isF2LDoneOn(downFace!, f) },
+        { key: 'eoll', check: (f: string) => !!downFace && isEOLLDoneOn(downFace!, f) },
+        { key: 'ocll', check: (f: string) => !!downFace && isOllDoneOn(downFace!, f) },
+        { key: 'cpll', check: (f: string) => !!downFace && isOllDoneOn(downFace!, f) && isHeadlightsDoneOn(downFace!, f) },
+        { key: 'epll', check: (f: string) => isSolved(f) },
+      ];
+    }
+    // cfop
+    return [
+      { key: 'cross', check: (f: string) => {
+        if (crossFace) return isCrossDoneOn(crossFace, f);
+        for (const face of FACES) if (isCrossDoneOn(face, f)) { crossFace = face; return true; }
+        return false;
+      }},
+      { key: 'f2l',  check: (f: string) => !!crossFace && isF2LDoneOn(crossFace!, f) },
+      { key: 'eoll', check: (f: string) => !!crossFace && isEOLLDoneOn(crossFace!, f) },
+      { key: 'ocll', check: (f: string) => !!crossFace && isOllDoneOn(crossFace!, f) },
+      { key: 'cpll', check: (f: string) => !!crossFace && isOllDoneOn(crossFace!, f) && isHeadlightsDoneOn(crossFace!, f) },
+      { key: 'epll', check: (f: string) => isSolved(f) },
+    ];
+  })();
+
+  const timings: (number | null)[] = phaseChecks.map(() => null);
+  let physicalIdx = 0;
+
+  for (const t of tokens) {
+    try { pat = pat.applyMove(t); } catch { return null; }
+    physicalIdx += t.endsWith('2') ? 2 : 1;
+    let facelets: string;
+    try { facelets = patternToFacelets(pat); } catch { continue; }
+    const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
+    const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
+    for (let i = 0; i < phaseChecks.length; i++) {
+      if (timings[i] !== null) continue;
+      // Strict in-order detection: only check phase i if phase i-1 is done.
+      if (i > 0 && timings[i - 1] === null) break;
+      if (phaseChecks[i].check(facelets)) timings[i] = tMs;
+    }
+  }
+
+  const out: Record<string, number> = {};
+  let prev = 0;
+  for (let i = 0; i < phaseChecks.length; i++) {
+    if (timings[i] === null) continue;
+    out[phaseChecks[i].key] = Math.max(0, (timings[i]!) - prev);
+    prev = timings[i]!;
+  }
+  return out;
+}
+
 function backfillF2lSplits() {
   if (!kpuzzle) return;
   let updated = 0;
@@ -610,6 +729,8 @@ const fsTagsFilterMenuEl = () => $$<HTMLSelectElement>('fs-tags-filter-menu');
 const fsTagEditorDialogEl = () => $$<HTMLDialogElement>('fs-tag-editor-dialog');
 const fsTagEditorTitleEl = () => $$('fs-tag-editor-title');
 const fsTagEditorSelectedEl = () => $$('fs-tag-editor-selected');
+const fsTagEditorMethodRowEl = () => $$('fs-tag-editor-method-row');
+const fsTagEditorMethodEl = () => $$<HTMLSelectElement>('fs-tag-editor-method');
 const fsTagEditorInputEl = () => $$<HTMLInputElement>('fs-tag-editor-input');
 const fsTagEditorListEl = () => $$('fs-tag-editor-list');
 const fsTagEditorCancelEl = () => $$<HTMLButtonElement>('fs-tag-editor-cancel');
@@ -2897,25 +3018,46 @@ function renderSolveList() {
     });
     actions.appendChild(eyeBtn);
 
-    // 🏷️ opens the tag editor for this solve. The chip on the row
-    // shows current tags (if any); the editor reuses the global
-    // dialog seeded with this row's tags.
-    const tagBtn = document.createElement('button');
-    tagBtn.className = iconBtnClass;
-    tagBtn.textContent = '🏷️';
-    tagBtn.title = 'Edit tags';
-    tagBtn.addEventListener('click', async (e) => {
+    // ✏️ opens the edit-solve dialog: method dropdown + tag editor.
+    // Tag chips already render inline on each row, so the user can
+    // see what's on the solve without opening this. Changing the
+    // method triggers a replay-based phase recompute so the graph
+    // and CSV reflect the new method's phase breakdown.
+    const editBtn = document.createElement('button');
+    editBtn.className = iconBtnClass;
+    editBtn.textContent = '✏️';
+    editBtn.title = 'Edit solve (method, tags)';
+    editBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const next = await openTagEditor(r.tags ?? [], `Tags · ${formatTime(r.totalMs)}`);
+      const next = await openEditSolveDialog(history[realIdx], `Edit · ${formatTime(r.totalMs)}`);
       if (next === null) return;
-      // Mutate the actual history record (use realIdx because `r` may
-      // come from a reversed slice in the renderer).
-      if (next.length > 0) history[realIdx].tags = next;
-      else delete history[realIdx].tags;
+      const rec = history[realIdx];
+      // Tags.
+      if (next.tags.length > 0) rec.tags = next.tags;
+      else delete rec.tags;
+      // Method change → replay to recompute phases under the new process.
+      // We also sync the Roux-only toggles to the current global prefs
+      // when switching INTO Roux (so the new record looks like a fresh
+      // Roux record) and drop them when switching AWAY.
+      if (next.process !== rec.process) {
+        const replayed = replayPhasesForProcess(rec, next.process);
+        rec.process = next.process;
+        if (replayed) rec.phases = replayed;
+        else rec.phases = {};
+        if (next.process === 'roux') {
+          rec.twoLookCmll = prefs.twoLookCmll;
+          rec.threeLookLse = prefs.threeLookLse;
+        } else {
+          delete rec.twoLookCmll;
+          delete rec.threeLookLse;
+        }
+        // F2L-slot data is CFOP-only; drop it on any switch away from CFOP.
+        if (next.process !== 'cfop') delete rec.f2lSplits;
+      }
       saveHistory();
       renderAllFilterDependent();
     });
-    actions.appendChild(tagBtn);
+    actions.appendChild(editBtn);
 
     // 🪗 toggles between the default (storage-form) display and the
     // expanded view that strikes through same-face groups and italicises
@@ -3244,13 +3386,22 @@ function renderAllFilterDependent() {
 let tagEditorResolve: ((tags: string[] | null) => void) | null = null;
 let tagEditorSelected: string[] = [];
 let tagEditorInitial: string[] = []; // snapshot at open, for has-changes detection
+// When non-null, the dialog is in "edit solve" mode: method row is
+// visible, the resolver returns method-and-tags instead of just tags.
+let editSolveResolve: ((result: { tags: string[]; process: Process } | null) => void) | null = null;
+let editSolveInitialProcess: Process | null = null;
 
 function openTagEditor(initial: string[], title = 'Tags'): Promise<string[] | null> {
   const dlg = fsTagEditorDialogEl();
   if (!dlg) return Promise.resolve(null);
   if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+  if (editSolveResolve)  { editSolveResolve(null);  editSolveResolve  = null; }
   tagEditorSelected = initial.slice();
   tagEditorInitial = initial.slice();
+  editSolveInitialProcess = null;
+  // Tag-only mode: hide the method row.
+  fsTagEditorMethodRowEl()?.classList.add('hidden');
+  fsTagEditorMethodRowEl()?.classList.remove('flex');
   const titleEl = fsTagEditorTitleEl();
   if (titleEl) titleEl.textContent = title;
   const input = fsTagEditorInputEl();
@@ -3261,6 +3412,34 @@ function openTagEditor(initial: string[], title = 'Tags'): Promise<string[] | nu
   dlg.showModal();
   if (input) input.focus();
   return new Promise<string[] | null>(resolve => { tagEditorResolve = resolve; });
+}
+
+// Per-row edit dialog: tags + method dropdown. Caller decides what to
+// do with method changes (typically: replay phases under the new
+// process and persist).
+function openEditSolveDialog(record: SolveRecord, title: string): Promise<{ tags: string[]; process: Process } | null> {
+  const dlg = fsTagEditorDialogEl();
+  if (!dlg) return Promise.resolve(null);
+  if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+  if (editSolveResolve)  { editSolveResolve(null);  editSolveResolve  = null; }
+  tagEditorSelected = (record.tags ?? []).slice();
+  tagEditorInitial = (record.tags ?? []).slice();
+  editSolveInitialProcess = record.process;
+  // Show method row + sync the select to the record's current method.
+  fsTagEditorMethodRowEl()?.classList.remove('hidden');
+  fsTagEditorMethodRowEl()?.classList.add('flex');
+  const methodSel = fsTagEditorMethodEl();
+  if (methodSel) methodSel.value = record.process;
+  const titleEl = fsTagEditorTitleEl();
+  if (titleEl) titleEl.textContent = title;
+  const input = fsTagEditorInputEl();
+  if (input) input.value = '';
+  renderTagEditorSelected();
+  renderTagEditorList('');
+  refreshTagEditorButtons();
+  dlg.showModal();
+  if (input) input.focus();
+  return new Promise(resolve => { editSolveResolve = resolve; });
 }
 
 // Sort-insensitive comparison: tag order within a solve is not
@@ -3303,7 +3482,12 @@ function refreshTagEditorButtons() {
   const addBtn = fsTagEditorAddEl();
   const saveBtn = fsTagEditorConfirmEl();
   const hasInput = !!normalizeTag(input?.value ?? '');
-  const hasChanges = !tagSetsEqual(tagEditorSelected, tagEditorInitial);
+  let hasChanges = !tagSetsEqual(tagEditorSelected, tagEditorInitial);
+  // In edit-solve mode, a method change also counts as "has changes".
+  if (editSolveResolve && editSolveInitialProcess) {
+    const cur = fsTagEditorMethodEl()?.value;
+    if (cur && cur !== editSolveInitialProcess) hasChanges = true;
+  }
   if (addBtn) {
     addBtn.disabled = !hasInput;
     // Add owns the default slot whenever it's enabled.
@@ -3383,10 +3567,16 @@ function wireTagEditorDialog() {
   fsTagEditorCancelEl()?.addEventListener('click', () => {
     dlg.close();
     if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+    if (editSolveResolve)  { editSolveResolve(null);  editSolveResolve  = null; }
   });
   fsTagEditorAddEl()?.addEventListener('click', () => {
     const i = fsTagEditorInputEl();
     if (i) addCurrentInputAsTag(i.value);
+  });
+  // Method dropdown (visible only in edit-solve mode) — flip Save's
+  // enabled state when the user picks a different process.
+  fsTagEditorMethodEl()?.addEventListener('change', () => {
+    refreshTagEditorButtons();
   });
   fsTagEditorConfirmEl()?.addEventListener('click', () => {
     // Defensive: if there's uncommitted text in the input, fold it into
@@ -3403,10 +3593,16 @@ function wireTagEditorDialog() {
       tagEditorResolve(tagEditorSelected.slice());
       tagEditorResolve = null;
     }
+    if (editSolveResolve) {
+      const method = (fsTagEditorMethodEl()?.value as Process) ?? editSolveInitialProcess!;
+      editSolveResolve({ tags: tagEditorSelected.slice(), process: method });
+      editSolveResolve = null;
+    }
   });
   // ESC closes via native dialog behavior — handle it as cancel.
   dlg.addEventListener('close', () => {
     if (tagEditorResolve) { tagEditorResolve(null); tagEditorResolve = null; }
+    if (editSolveResolve)  { editSolveResolve(null);  editSolveResolve  = null; }
   });
 
   input.addEventListener('input', (e) => {

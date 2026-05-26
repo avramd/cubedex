@@ -862,9 +862,21 @@
     <p>Cubedex has been created with ♥ by <a href="https://twitter.com/pof" target="_blank" class="text-blue-500 hover:underline">Pau Oliva Fora</a> using <a href="https://github.com/poliva/smartcube-web-bluetooth" target="_blank" class="text-blue-500 hover:underline">smartcube-web-bluetooth</a> and <a href="https://github.com/cubing/cubing.js" target="_blank" class="text-blue-500 hover:underline">cubing.js</a>.</p>
     <p>The <a href="https://github.com/poliva/cubedex" target="_blank" class="text-blue-500 hover:underline">source code</a> is available on GitHub, feel free to contribute by sending a PR or <a href="https://ko-fi.com/cubedex" target="_blank" class="text-blue-500 hover:underline">buy me a coffee</a>.</p>
   </div>
-  <!-- Tag editor dialog (used by pre-solve tag button + per-row tag button). -->
+  <!-- Edit-solve dialog: tags (always) + method (per-row only).
+       Reused by the pre-solve tag button (method row hidden) and the
+       per-row edit button (method row shown). -->
   <dialog id="fs-tag-editor-dialog" class="rounded-lg p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 backdrop:bg-black/40 min-w-[280px] max-w-[420px]">
     <div class="font-semibold text-sm mb-2" id="fs-tag-editor-title">Tags</div>
+    <div id="fs-tag-editor-method-row" class="hidden flex items-center gap-2 mb-2 text-sm">
+      <label for="fs-tag-editor-method" class="font-semibold">Method:</label>
+      <select id="fs-tag-editor-method" class="p-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-900 text-sm">
+        <option value="cfop">CFOP</option>
+        <option value="roux">Roux</option>
+        <option value="f3ul">F3uL</option>
+        <option value="beginner">Beginner</option>
+      </select>
+    </div>
+    <div class="text-xs text-gray-500 dark:text-gray-400 mb-1">Tags:</div>
     <div id="fs-tag-editor-selected" class="flex flex-wrap gap-1 mb-2 min-h-[1.5rem]"></div>
     <input id="fs-tag-editor-input" type="text" autocomplete="off" placeholder="Add or filter tags…" class="w-full text-sm px-2 py-1 mb-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900" />
     <div id="fs-tag-editor-list" class="max-h-40 overflow-y-auto text-sm mb-3 border border-gray-200 dark:border-gray-700 rounded"></div>
