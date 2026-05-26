@@ -24,7 +24,7 @@ import {
 import { historyToCsv } from './fullSolve/csvExport';
 import {
   normalizeTag, allTagsWithCounts, sortedTagsForDialog,
-  applyTagFilter, pushRecentTagSet, tagFilterLabel,
+  applyTagFilter, pushRecentTagSet, tagFilterLabel, isProcessName,
   type TagFilter,
 } from './fullSolve/tags';
 import { rollingAverage, meanAndSd } from './fullSolve/stats';
@@ -3016,6 +3016,15 @@ function renderSolveList() {
     // squeeze. Empty when the solve has no tags.
     const tagChips = document.createElement('div');
     tagChips.className = 'flex items-center gap-1 flex-shrink-0';
+    // Process chip first — styled differently from user tags so it's
+    // visually distinguishable but still reads as a tag. Treated as a
+    // virtual auto-tag for filtering purposes (see tags.applyTagFilter).
+    if (r.process) {
+      const chip = document.createElement('span');
+      chip.className = 'px-1.5 py-0.5 rounded border border-gray-400 dark:border-gray-500 text-gray-700 dark:text-gray-200 text-[10px] sm:text-xs italic';
+      chip.textContent = r.process;
+      tagChips.appendChild(chip);
+    }
     if (r.tags && r.tags.length > 0) {
       for (const t of r.tags) {
         const chip = document.createElement('span');
@@ -3551,7 +3560,13 @@ function refreshTagEditorButtons() {
   const input = fsTagEditorInputEl();
   const addBtn = fsTagEditorAddEl();
   const saveBtn = fsTagEditorConfirmEl();
-  const hasInput = !!normalizeTag(input?.value ?? '');
+  const normalized = normalizeTag(input?.value ?? '');
+  const hasInput = !!normalized;
+  // Process names (cfop/roux/f3ul/beginner) can't be added as literal
+  // tags — they're already a first-class field on every record (and
+  // surface as virtual auto-tags in the filter UI). Disable Add for
+  // these so users don't end up with redundant "cfop" tags.
+  const isReserved = !!normalized && isProcessName(normalized);
   let hasChanges = !tagSetsEqual(tagEditorSelected, tagEditorInitial);
   // In edit-solve mode, a method change also counts as "has changes".
   if (editSolveResolve && editSolveInitialProcess) {
@@ -3559,14 +3574,17 @@ function refreshTagEditorButtons() {
     if (cur && cur !== editSolveInitialProcess) hasChanges = true;
   }
   if (addBtn) {
-    addBtn.disabled = !hasInput;
+    addBtn.disabled = !hasInput || isReserved;
+    addBtn.title = isReserved
+      ? `"${normalized}" is a method name — change it in the Method dropdown instead.`
+      : '';
     // Add owns the default slot whenever it's enabled.
-    setButtonRole(addBtn, hasInput ? 'primary' : 'secondary');
+    setButtonRole(addBtn, !addBtn.disabled ? 'primary' : 'secondary');
   }
   if (saveBtn) {
     saveBtn.disabled = !hasChanges;
     // Save is primary only when Add isn't claiming the default slot.
-    setButtonRole(saveBtn, !hasInput ? 'primary' : 'secondary');
+    setButtonRole(saveBtn, addBtn?.disabled ? 'primary' : 'secondary');
   }
 }
 
@@ -3840,10 +3858,14 @@ function renderAdvancedFilterDialog() {
   const makeChip = (tag: string) => {
     const chip = document.createElement('div');
     const selected = filterDialogSelected === tag;
+    const reserved = isProcessName(tag);
+    // Process names (virtual auto-tags) get italic + neutral border to
+    // match the row-chip style; selected state still uses blue ring.
+    const base = reserved
+      ? 'border-gray-400 dark:border-gray-500 text-gray-700 dark:text-gray-200 italic hover:bg-gray-50 dark:hover:bg-gray-700'
+      : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700';
     chip.className = `flex items-center px-2 py-1 rounded border text-xs cursor-pointer select-none ${
-      selected
-        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900 ring-2 ring-blue-400'
-        : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700'
+      selected ? 'border-blue-500 bg-blue-50 dark:bg-blue-900 ring-2 ring-blue-400' : base
     }`;
     chip.draggable = true;
     chip.textContent = tag;

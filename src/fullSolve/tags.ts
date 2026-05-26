@@ -1,9 +1,24 @@
-import type { SolveRecord } from './types';
+import type { SolveRecord, Process } from './types';
 
 // Pure helpers for the solve-tagging feature: normalization, the tag
 // corpus (with usage counts), sort/filter for the editor dialog, the
 // include/exclude graph filter, and recent-set management. Kept DOM-
 // free so it's straightforward to unit-test.
+//
+// Process names (cfop/roux/f3ul/beginner) are treated as VIRTUAL
+// auto-tags: they appear in the corpus + filter UI alongside real
+// user tags, and applyTagFilter matches them via record.process.
+// They can't be added as literal tags — the editor disables Add when
+// the typed value matches one of these.
+
+export const PROCESS_NAMES: readonly Process[] = ['cfop', 'roux', 'f3ul', 'beginner'];
+const PROCESS_NAME_SET: ReadonlySet<string> = new Set(PROCESS_NAMES);
+
+// True iff `s` (already-normalized) is one of the reserved process
+// names. Used by the tag editor to disable Add for these strings.
+export function isProcessName(s: string): boolean {
+  return PROCESS_NAME_SET.has(s);
+}
 
 // Lowercase, trim, collapse internal whitespace. Returns null for
 // inputs that are empty after trimming (the editor uses null to
@@ -17,9 +32,14 @@ export function normalizeTag(s: string): string | null {
 // to already be normalized (they're normalized on write at the editor
 // boundary; older imports may not be — those are coerced via
 // normalizeTag here as a defensive measure).
+//
+// Each record's `process` is also counted as a virtual auto-tag, so
+// process names show up in the same corpus used by the filter dialog
+// and the editor's autocomplete list.
 export function allTagsWithCounts(history: SolveRecord[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const r of history) {
+    if (r.process) counts.set(r.process, (counts.get(r.process) ?? 0) + 1);
     if (!r.tags) continue;
     for (const raw of r.tags) {
       const t = normalizeTag(raw);
@@ -57,6 +77,13 @@ export interface TagFilter {
   exclude: string[];
 }
 
+// The effective tag set a record contributes for filtering purposes:
+// its real tags plus its process name as a virtual auto-tag.
+function effectiveTags(r: SolveRecord): string[] {
+  if (r.process) return [...(r.tags ?? []), r.process];
+  return r.tags ?? [];
+}
+
 // Apply include/exclude filter to a history slice. Semantics:
 //   - empty include AND empty exclude → all records pass
 //   - exclude wins: any record having ANY excluded tag is dropped,
@@ -64,6 +91,10 @@ export interface TagFilter {
 //   - non-empty include: at least one included tag must be present
 //   - empty include + non-empty exclude: pass everything except
 //     records with excluded tags
+//
+// Process names count as virtual tags on every record (see
+// effectiveTags), so e.g. `include: ['cfop']` matches every record
+// with process === 'cfop'.
 export function applyTagFilter(
   records: SolveRecord[],
   filter: TagFilter,
@@ -72,7 +103,7 @@ export function applyTagFilter(
   const exc = filter.exclude;
   if (inc.length === 0 && exc.length === 0) return records.slice();
   return records.filter(r => {
-    const tags = r.tags ?? [];
+    const tags = effectiveTags(r);
     if (exc.length > 0) {
       for (const t of tags) if (exc.includes(t)) return false;
     }

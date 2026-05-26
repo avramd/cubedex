@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeTag, allTagsWithCounts, sortedTagsForDialog,
   applyTagFilter, pushRecentTagSet, tagFilterLabel,
+  isProcessName, PROCESS_NAMES,
   type TagFilter,
 } from './tags';
 import type { SolveRecord } from './types';
@@ -49,8 +50,12 @@ describe('allTagsWithCounts', () => {
     expect(c.get('oll')).toBe(1);
   });
 
-  it('returns empty for tag-free history', () => {
-    expect(allTagsWithCounts([rec(), rec()]).size).toBe(0);
+  it('counts process names even when no real tags are set', () => {
+    // Tag-free history still produces process counts (every record
+    // has a process, treated as a virtual auto-tag).
+    const c = allTagsWithCounts([rec(), rec()]);
+    expect(c.get('cfop')).toBe(2);
+    expect(c.size).toBe(1);   // just the process; no real tags
   });
 
   it('defensively normalizes stored tags', () => {
@@ -58,7 +63,9 @@ describe('allTagsWithCounts', () => {
     const h = [rec(['Speed', 'SPEED', '  speed  '])];
     const c = allTagsWithCounts(h);
     expect(c.get('speed')).toBe(3);
-    expect(c.size).toBe(1);
+    // Map also contains the record's process name (cfop) as a
+    // virtual auto-tag, so size is 2 not 1.
+    expect(c.size).toBe(2);
   });
 });
 
@@ -183,5 +190,59 @@ describe('tagFilterLabel', () => {
   it('shows both with a pipe separator', () => {
     expect(tagFilterLabel({ include: ['speed'], exclude: ['paused'] }))
       .toBe('include: speed | exclude: paused');
+  });
+});
+
+describe('process names as virtual tags', () => {
+  it('isProcessName recognizes the 4 reserved names', () => {
+    for (const p of PROCESS_NAMES) expect(isProcessName(p)).toBe(true);
+    expect(isProcessName('speed')).toBe(false);
+    expect(isProcessName('')).toBe(false);
+    expect(isProcessName('CFOP')).toBe(false);  // already-normalized check, lowercase only
+  });
+
+  it('PROCESS_NAMES contains the 4 known processes', () => {
+    expect([...PROCESS_NAMES].sort())
+      .toEqual(['beginner', 'cfop', 'f3ul', 'roux']);
+  });
+
+  it('allTagsWithCounts includes each record\'s process as a virtual tag', () => {
+    const h = [
+      rec(['speed'], { process: 'cfop' }),
+      rec([], { process: 'cfop' }),
+      rec(['speed'], { process: 'roux' }),
+    ];
+    const c = allTagsWithCounts(h);
+    expect(c.get('cfop')).toBe(2);
+    expect(c.get('roux')).toBe(1);
+    expect(c.get('speed')).toBe(2);
+  });
+
+  it('applyTagFilter — including a process name filters by record.process', () => {
+    const cfop = rec(['speed'], { process: 'cfop' });
+    const roux = rec(['speed'], { process: 'roux' });
+    const f3ul = rec([], { process: 'f3ul' });
+    const r = applyTagFilter([cfop, roux, f3ul], { include: ['roux'], exclude: [] });
+    expect(r).toEqual([roux]);
+  });
+
+  it('applyTagFilter — excluding a process name hides that method\'s records', () => {
+    const cfop = rec(['speed'], { process: 'cfop' });
+    const roux = rec(['speed'], { process: 'roux' });
+    const r = applyTagFilter([cfop, roux], { include: [], exclude: ['cfop'] });
+    expect(r).toEqual([roux]);
+  });
+
+  it('applyTagFilter — process names interact with tags as expected', () => {
+    const cfopSpeed = rec(['speed'], { process: 'cfop' });
+    const cfopWarm  = rec(['warmup'], { process: 'cfop' });
+    const rouxSpeed = rec(['speed'], { process: 'roux' });
+    const history = [cfopSpeed, cfopWarm, rouxSpeed];
+    // Include "speed OR roux" → cfopSpeed (speed), cfopWarm (no), rouxSpeed (both).
+    const r1 = applyTagFilter(history, { include: ['speed', 'roux'], exclude: [] });
+    expect(r1).toEqual([cfopSpeed, rouxSpeed]);
+    // Exclude cfop overrides include of speed: cfopSpeed is dropped.
+    const r2 = applyTagFilter(history, { include: ['speed'], exclude: ['cfop'] });
+    expect(r2).toEqual([rouxSpeed]);
   });
 });
