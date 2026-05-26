@@ -594,14 +594,19 @@ const PHASE_COLORS = [
   // F2L runs at alpha 0.75 so the unsplit / no-data band reads at the
   // same saturation as the topmost sub-band when the F2L-slots toggle is
   // on. F2L is usually the largest phase by far, so its higher contrast
-  // is also visually appropriate.
-  'rgba(16, 185, 129, 0.75)',  // 1  green  — F2L / F2B
+  // is also visually appropriate. FML (F3uL's "fix middle layer") shares
+  // this color since FML lands the cube in the same state as CFOP's F2L
+  // being done — it's conceptually the tail of the F2L stage.
+  'rgba(16, 185, 129, 0.75)',  // 1  green  — F2L / FML  (4th F2L sub-band)
   'rgba(234, 179, 8, 0.6)',    // 2  yellow — EOLL / LSEO
   'rgba(249, 115, 22, 0.6)',   // 3  orange — OCLL / headlights
   'rgba(59, 130, 246, 0.6)',   // 4  blue   — CPLL / OPLL
   'rgba(139, 92, 246, 0.6)',   // 5  purple — EPLL / OPME (final phase)
   'rgba(244, 63, 94, 0.6)',    // 6  red    — LRE (Roux's UL/UR-placed)
-  'rgba(20, 184, 166, 0.6)',   // 7  teal   — FML (F3uL's "fix middle layer")
+  // F2B uses the 2nd F2L sub-band shade (alpha 0.45) — same green
+  // family as F2L/FML, just less saturated so the two block phases
+  // read as related-but-distinct.
+  'rgba(16, 185, 129, 0.45)',  // 7  green-light — F2B  (2nd F2L sub-band)
 ];
 
 // The canonical RECORDING phase sequence — what phase detection watches
@@ -622,7 +627,7 @@ function currentPhaseSequence(): PhaseDef[] {
   if (prefs.process === 'roux') {
     return [
       { key: 'f1b',  label: '1st Block', predicate: isFirstBlockDone,  color: PHASE_COLORS[0] },
-      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[1] },
+      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[7] },
       { key: 'ocll', label: 'OCLL',      predicate: isCmllOriented,    color: PHASE_COLORS[3] },
       { key: 'opll', label: 'OPLL',      predicate: isCmllDone,        color: PHASE_COLORS[4] },
       { key: 'lseo', label: 'LSEO',      predicate: isLseOriented,     color: PHASE_COLORS[2] },
@@ -633,8 +638,8 @@ function currentPhaseSequence(): PhaseDef[] {
   if (prefs.process === 'f3ul') {
     return [
       { key: 'f1b',  label: '1st Block', predicate: isFirstBlockDone,  color: PHASE_COLORS[0] },
-      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[1] },
-      { key: 'fml',  label: 'FML',       predicate: isFmlDone,         color: PHASE_COLORS[7] },
+      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[7] },
+      { key: 'fml',  label: 'FML',       predicate: isFmlDone,         color: PHASE_COLORS[1] },
       { key: 'eoll', label: 'EOLL',      predicate: isYellowCrossDone, color: PHASE_COLORS[2] },
       { key: 'ocll', label: 'OCLL',      predicate: isOllDone,         color: PHASE_COLORS[3] },
       { key: 'cpll', label: 'CPLL',      predicate: (f) => isOllDone(f) && isHeadlightsDone(f), color: PHASE_COLORS[4] },
@@ -1884,6 +1889,26 @@ function invertMoveTok(m: string): string {
 
 // ---------- Graph ----------
 
+// Diagonal-stripe pattern used by the missing-data overlay band. The
+// stripes read as "no data here" in standard data-visualisation idiom
+// (vs. a solid fill, which would be misread as a phase band).
+function makeStripePattern(isDark: boolean): CanvasPattern | null {
+  const size = 8;
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  if (!ctx) return null;
+  ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.22)';
+  ctx.lineWidth = 1.25;
+  ctx.beginPath();
+  // Wrap the diagonal across 3 segments so the pattern tiles seamlessly.
+  ctx.moveTo(-2, 2);  ctx.lineTo(2, -2);
+  ctx.moveTo(-2, 10); ctx.lineTo(10, -2);
+  ctx.moveTo(6, 10);  ctx.lineTo(10, 6);
+  ctx.stroke();
+  return ctx.createPattern(c, 'repeat');
+}
+
 function renderGraph() {
   const canvas = fsGraphCanvasEl();
   if (!canvas) return;
@@ -2114,6 +2139,44 @@ function renderGraph() {
     return sum / 1000;
   };
   const totals = slice.map(recordTotalSec);
+
+  // Missing-data overlay: when the sum of a record's phase bands is
+  // less than its totalMs (e.g., a phase predicate never fired during
+  // the solve, so r.phases is incomplete), append a synthetic band
+  // that fills the gap up to totalMs. Rendered as a diagonal-stripe
+  // pattern so the user reads it as "missing data" rather than mis-
+  // interpreting a short stack as a faster solve. The stripe sits on
+  // top of the last phase band; when sum >= totalMs the gap is 0 and
+  // the band collapses invisibly.
+  const isDark = document.documentElement.classList.contains('dark');
+  const missingTopSec: number[] = slice.map((r, idx) => {
+    if (focusedPhaseGroup) return totals[idx];  // focused mode: no gap overlay
+    const lastBand = cumulative[idx][cumulative[idx].length - 1] ?? 0;
+    const goal = r.totalMs / 1000;
+    return Math.max(lastBand, goal);
+  });
+  const hasAnyGap = missingTopSec.some((v, i) =>
+    v - (cumulative[i][cumulative[i].length - 1] ?? 0) > 1e-3);
+  if (hasAnyGap) {
+    const stripePattern = makeStripePattern(isDark);
+    const stripeStroke = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)';
+    datasets.push({
+      type: 'line' as const,
+      label: '(missing data)',
+      data: missingTopSec,
+      backgroundColor: stripePattern ?? 'rgba(128,128,128,0.15)',
+      borderColor: stripeStroke,
+      borderWidth: 1,
+      borderDash: [3, 3],
+      fill: '-1',
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      tension: 0.15,
+      order: 2,
+      clip: false,
+    });
+  }
+
   // Ao5/Ao12 are computed over ALL history, then tail-sliced to the
   // visible window. Otherwise the first few entries in the window can't
   // form a complete window of size N and the trendline would flat-line
@@ -2125,7 +2188,6 @@ function renderGraph() {
   const tailOf = (arr: (number | null)[]) => arr.slice(-slice.length);
   const ao5Series = prefs.graphAo5 ? tailOf(rollingAverage(allTotals, 5)) : null;
   const ao12Series = prefs.graphAo12 ? tailOf(rollingAverage(allTotals, 12)) : null;
-  const isDark = document.documentElement.classList.contains('dark');
   const ao5Color = isDark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)';
   const ao12Color = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.45)';
   if (ao5Series) {
@@ -2790,8 +2852,8 @@ const PHASE_COLOR_BY_KEY: Record<string, string> = {
   ll:    PHASE_COLORS[4],
   // Roux / F3uL
   f1b:   PHASE_COLORS[0],
-  f2b:   PHASE_COLORS[1],
-  fml:   PHASE_COLORS[7],
+  f2b:   PHASE_COLORS[7],   // green-light — 2nd F2L sub-band shade
+  fml:   PHASE_COLORS[1],   // same green as F2L — F3uL's FML lands in F2L-done state
   opll:  PHASE_COLORS[4],
   cmll:  PHASE_COLORS[4],   // aggregate uses OPLL's color (top of stack)
   lseo:  PHASE_COLORS[2],
