@@ -3,10 +3,12 @@ import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
-import { type Face, FACES, faceStickers, isSolved } from './cube/facelets';
+import { type Face, FACES, OPPOSITE, faceStickers, isSolved } from './cube/facelets';
 import {
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
   f2lSlotsDoneOn,
+  isRouxFirstBlockDoneOn, isRouxSecondBlockDoneOn,
+  areTopCornersOrientedOn, isLSEOrientedOn, isLREDoneOn,
 } from './cube/predicates';
 import { generateRandomScramble3x3 } from './cube/scramble';
 import { type Process, type SolveRecord } from './fullSolve/types';
@@ -56,6 +58,12 @@ interface FullSolvePrefs {
   // milestone recorded in SolveRecord.f2lSplits. Solves without f2lSplits
   // (pre-feature records) render as a single full-alpha band regardless.
   f2lSplits: boolean;
+  // Roux-only: when true, split CMLL into OCLL (corner orientation) +
+  // OPLL (corner permutation headlights). Ignored for non-Roux processes.
+  twoLookCmll: boolean;
+  // Roux-only: when true, split LSE into LSEO → LRE → OPME (3-look LSE).
+  // Ignored for non-Roux processes.
+  threeLookLse: boolean;
   // Tags pending to be applied to the NEXT completed solve. Sticky:
   // they remain after each solve until the user removes them via the
   // pre-solve tag editor.
@@ -93,6 +101,8 @@ const defaultPrefs: FullSolvePrefs = {
   graphAo5: true,
   graphAo12: true,
   f2lSplits: false,
+  twoLookCmll: false,
+  threeLookLse: false,
   pendingSolveTags: [],
   graphTagFilter: { include: [], exclude: [] },
   recentTagSets: [],
@@ -204,7 +214,11 @@ interface ReplayDerived {
 
 function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   if (!kpuzzle) return null;
+  // Backfill only applies to CFOP's F2L slot splits + 2-look LL timings.
+  // Beginner has no F2L; Roux / F3uL split F2L into named block phases,
+  // so per-slot timing isn't meaningful for them.
   if (r.process === 'beginner') return null;
+  if (r.process === 'roux' || r.process === 'f3ul') return null;
   if (!r.turns || r.turns.length === 0) return null;
   let p = kpuzzle.defaultPattern();
   for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
@@ -387,6 +401,69 @@ function isHeadlightsDone(facelets: string): boolean {
   return detectedCrossFace ? isHeadlightsDoneOn(detectedCrossFace, facelets) : false;
 }
 
+// ---------- Roux / F3uL stateful wrappers ----------
+//
+// Roux is parameterised by TWO orientation choices: the down-face (like
+// CFOP's cross face) AND which side hosts the first 1x2x3 block (one of
+// the 4 faces adjacent to D). Once the first block is detected, we lock
+// BOTH so subsequent predicates dispatch directly. For F3uL we only
+// need detectedDownFace (FML reuses CFOP's F2L predicate against it).
+
+let detectedDownFace: Face | null = null;
+let detectedRouxSide1: Face | null = null;
+
+function isFirstBlockDone(facelets: string): boolean {
+  if (detectedDownFace && detectedRouxSide1) {
+    return isRouxFirstBlockDoneOn(detectedDownFace, detectedRouxSide1, facelets);
+  }
+  for (const d of FACES) {
+    for (const s of FACES) {
+      if (s === d || s === OPPOSITE[d]) continue;
+      if (isRouxFirstBlockDoneOn(d, s, facelets)) {
+        detectedDownFace = d;
+        detectedRouxSide1 = s;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isSecondBlockDone(facelets: string): boolean {
+  if (!detectedDownFace || !detectedRouxSide1) return false;
+  return isRouxSecondBlockDoneOn(detectedDownFace, detectedRouxSide1, facelets);
+}
+
+function isFmlDone(facelets: string): boolean {
+  // F3uL's "fix middle layer" lands the cube in CFOP's F2L-done state.
+  return detectedDownFace ? isF2LDoneOn(detectedDownFace, facelets) : false;
+}
+
+function isCmllOriented(facelets: string): boolean {
+  // CORNERS-ONLY orientation (top edges are ignored throughout CMLL).
+  return detectedDownFace ? areTopCornersOrientedOn(detectedDownFace, facelets) : false;
+}
+
+function isCmllDone(facelets: string): boolean {
+  // OCLL + headlights — same pairwise-match semantic CFOP uses for CPLL.
+  return detectedDownFace
+    ? (areTopCornersOrientedOn(detectedDownFace, facelets)
+       && isHeadlightsDoneOn(detectedDownFace, facelets))
+    : false;
+}
+
+function isLseOriented(facelets: string): boolean {
+  return (detectedDownFace && detectedRouxSide1)
+    ? isLSEOrientedOn(detectedDownFace, detectedRouxSide1, facelets)
+    : false;
+}
+
+function isLreDone(facelets: string): boolean {
+  return (detectedDownFace && detectedRouxSide1)
+    ? isLREDoneOn(detectedDownFace, detectedRouxSide1, facelets)
+    : false;
+}
+
 // ---------- Phase sequences ----------
 
 // Index 0 (cross) and index 4 (CPLL) are swapped from a natural rainbow
@@ -394,16 +471,18 @@ function isHeadlightsDone(facelets: string): boolean {
 //   2-look OLL:  yellow (EOLL) → orange (OCLL)
 //   2-look PLL:  blue (CPLL)   → purple (EPLL)
 const PHASE_COLORS = [
-  'rgba(236, 72, 153, 0.6)',   // pink — cross
+  'rgba(236, 72, 153, 0.6)',   // 0  pink   — cross / F1B
   // F2L runs at alpha 0.75 so the unsplit / no-data band reads at the
   // same saturation as the topmost sub-band when the F2L-slots toggle is
   // on. F2L is usually the largest phase by far, so its higher contrast
   // is also visually appropriate.
-  'rgba(16, 185, 129, 0.75)',  // green — F2L
-  'rgba(234, 179, 8, 0.6)',    // yellow — yellow-cross (2-look OLL) / OLL
-  'rgba(249, 115, 22, 0.6)',   // orange — full OLL (2-look OLL) / headlights (2-look PLL)
-  'rgba(59, 130, 246, 0.6)',   // blue — CPLL (2-look PLL)
-  'rgba(139, 92, 246, 0.6)',   // purple — EPLL / PLL
+  'rgba(16, 185, 129, 0.75)',  // 1  green  — F2L / F2B
+  'rgba(234, 179, 8, 0.6)',    // 2  yellow — EOLL / LSEO
+  'rgba(249, 115, 22, 0.6)',   // 3  orange — OCLL / headlights
+  'rgba(59, 130, 246, 0.6)',   // 4  blue   — CPLL / OPLL
+  'rgba(139, 92, 246, 0.6)',   // 5  purple — EPLL / OPME (final phase)
+  'rgba(244, 63, 94, 0.6)',    // 6  red    — LRE (Roux's UL/UR-placed)
+  'rgba(20, 184, 166, 0.6)',   // 7  teal   — FML (F3uL's "fix middle layer")
 ];
 
 // The canonical RECORDING phase sequence — what phase detection watches
@@ -419,6 +498,28 @@ function currentPhaseSequence(): PhaseDef[] {
     return [
       { key: 'setup', label: 'Setup', predicate: isYellowCrossDone, color: PHASE_COLORS[0] },
       { key: 'll', label: 'LL', predicate: isSolved, color: PHASE_COLORS[4] },
+    ];
+  }
+  if (prefs.process === 'roux') {
+    return [
+      { key: 'f1b',  label: '1st Block', predicate: isFirstBlockDone,  color: PHASE_COLORS[0] },
+      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[1] },
+      { key: 'ocll', label: 'OCLL',      predicate: isCmllOriented,    color: PHASE_COLORS[3] },
+      { key: 'opll', label: 'OPLL',      predicate: isCmllDone,        color: PHASE_COLORS[4] },
+      { key: 'lseo', label: 'LSEO',      predicate: isLseOriented,     color: PHASE_COLORS[2] },
+      { key: 'lre',  label: 'LRE',       predicate: isLreDone,         color: PHASE_COLORS[6] },
+      { key: 'opme', label: 'OPME',      predicate: isSolved,          color: PHASE_COLORS[5] },
+    ];
+  }
+  if (prefs.process === 'f3ul') {
+    return [
+      { key: 'f1b',  label: '1st Block', predicate: isFirstBlockDone,  color: PHASE_COLORS[0] },
+      { key: 'f2b',  label: '2nd Block', predicate: isSecondBlockDone, color: PHASE_COLORS[1] },
+      { key: 'fml',  label: 'FML',       predicate: isFmlDone,         color: PHASE_COLORS[7] },
+      { key: 'eoll', label: 'EOLL',      predicate: isYellowCrossDone, color: PHASE_COLORS[2] },
+      { key: 'ocll', label: 'OCLL',      predicate: isOllDone,         color: PHASE_COLORS[3] },
+      { key: 'cpll', label: 'CPLL',      predicate: (f) => isOllDone(f) && isHeadlightsDone(f), color: PHASE_COLORS[4] },
+      { key: 'epll', label: 'EPLL',      predicate: isSolved,          color: PHASE_COLORS[5] },
     ];
   }
   return [
@@ -437,19 +538,36 @@ function currentPhaseSequence(): PhaseDef[] {
 // aggregate visually matches the top of the split stack.
 function displayPhaseSequence(): PhaseDef[] {
   const seq = currentPhaseSequence();
-  if (prefs.process !== 'cfop') return seq;
+  if (prefs.process === 'beginner') return seq;
   const out: PhaseDef[] = [];
   for (let i = 0; i < seq.length; i++) {
     const p = seq[i];
+    // CFOP + F3uL: same 2-look OLL / 2-look PLL collapse rules.
     if (!prefs.twoLookOll && p.key === 'eoll' && seq[i + 1]?.key === 'ocll') {
       out.push({ key: 'oll', label: 'OLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
       i++;
-    } else if (!prefs.twoLookPll && p.key === 'cpll' && seq[i + 1]?.key === 'epll') {
+      continue;
+    }
+    if (!prefs.twoLookPll && p.key === 'cpll' && seq[i + 1]?.key === 'epll') {
       out.push({ key: 'pll', label: 'PLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
       i++;
-    } else {
-      out.push(p);
+      continue;
     }
+    // Roux: 2-look CMLL collapses OCLL+OPLL → CMLL.
+    if (prefs.process === 'roux' && !prefs.twoLookCmll
+        && p.key === 'ocll' && seq[i + 1]?.key === 'opll') {
+      out.push({ key: 'cmll', label: 'CMLL', predicate: seq[i + 1].predicate, color: seq[i + 1].color });
+      i++;
+      continue;
+    }
+    // Roux: 3-look LSE collapses LSEO+LRE+OPME → LSE.
+    if (prefs.process === 'roux' && !prefs.threeLookLse
+        && p.key === 'lseo' && seq[i + 1]?.key === 'lre' && seq[i + 2]?.key === 'opme') {
+      out.push({ key: 'lse', label: 'LSE', predicate: seq[i + 2].predicate, color: seq[i + 2].color });
+      i += 2;
+      continue;
+    }
+    out.push(p);
   }
   return out;
 }
@@ -466,7 +584,10 @@ const fsProcessEl = () => $$<HTMLSelectElement>('fs-process-select');
 const fsInspectionEl = () => $$<HTMLSelectElement>('fs-inspection-select');
 const fsTwoLookOllEl = () => $$<HTMLInputElement>('fs-twolook-oll-toggle');
 const fsTwoLookPllEl = () => $$<HTMLInputElement>('fs-twolook-pll-toggle');
+const fsTwoLookCmllEl = () => $$<HTMLInputElement>('fs-twolook-cmll-toggle');
+const fsThreeLookLseEl = () => $$<HTMLInputElement>('fs-threelook-lse-toggle');
 const fsCfopOptionsEl = () => $$('fs-cfop-options');
+const fsRouxOptionsEl = () => $$('fs-roux-options');
 const fsScrambleEl = () => $$('fs-scramble-display');
 const fsTimerEl = () => $$('fs-timer');
 const fsStatusEl = () => $$('fs-status');
@@ -835,6 +956,14 @@ function renderStatsBoxes() {
       optionTags.push('CFOP');
       if (prefs.twoLookOll) optionTags.push('2-look OLL');
       if (prefs.twoLookPll) optionTags.push('2-look PLL');
+    } else if (prefs.process === 'roux') {
+      optionTags.push('Roux');
+      if (prefs.twoLookCmll) optionTags.push('2-look CMLL');
+      if (prefs.threeLookLse) optionTags.push('3-look LSE');
+    } else if (prefs.process === 'f3ul') {
+      optionTags.push('F3uL');
+      if (prefs.twoLookOll) optionTags.push('2-look OLL');
+      if (prefs.twoLookPll) optionTags.push('2-look PLL');
     } else {
       optionTags.push('Beginner');
     }
@@ -866,8 +995,16 @@ function updateCubeGate() {
 }
 
 function updateCfopOptionsVisibility() {
-  fsCfopOptionsEl()?.classList.toggle('hidden', prefs.process !== 'cfop');
-  fsCfopOptionsEl()?.classList.toggle('flex', prefs.process === 'cfop');
+  // CFOP-shaped options (2-look OLL/PLL, F2L slots, share scrambles)
+  // are shown for CFOP AND F3uL — F3uL's last-layer steps are identical
+  // to CFOP's, so the same toggles apply.
+  const cfopLike = prefs.process === 'cfop' || prefs.process === 'f3ul';
+  fsCfopOptionsEl()?.classList.toggle('hidden', !cfopLike);
+  fsCfopOptionsEl()?.classList.toggle('flex', cfopLike);
+  // Roux-only toggle group (2-look CMLL, 3-look LSE).
+  const isRoux = prefs.process === 'roux';
+  fsRouxOptionsEl()?.classList.toggle('hidden', !isRoux);
+  fsRouxOptionsEl()?.classList.toggle('flex', isRoux);
 }
 
 // ---------- Scramble display ----------
@@ -1158,6 +1295,8 @@ function resetSolveState() {
   f2lSlotsEverDone = 0;
   halfwayActive = false;
   detectedCrossFace = null;
+  detectedDownFace = null;
+  detectedRouxSide1 = null;
   phaseSeq = currentPhaseSequence();
   phaseTimestamps = phaseSeq.map(() => null);
   phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
@@ -1201,6 +1340,8 @@ function abortSolve() {
   solveF2lSplits = [];
   f2lSlotsEverDone = 0;
   detectedCrossFace = null;
+  detectedDownFace = null;
+  detectedRouxSide1 = null;
   phaseTimestamps = phaseSeq.map(() => null);
   phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
   pauseState = {
@@ -1356,7 +1497,12 @@ function onSolveMove(move: string) {
 // to 4 entries (the 4 F2L slots). Skipped for beginner mode (no F2L
 // phase) and before cross has been detected.
 function sampleF2lSlotProgression(facelets: string, now: number) {
+  // Slot-progression sampling is CFOP-specific. Beginner has no F2L
+  // phase; Roux/F3uL replace F2L with 2 explicit block phases (F1B,
+  // F2B) whose timings the user gets directly, so sub-slot splits add
+  // no information.
   if (prefs.process === 'beginner') return;
+  if (prefs.process === 'roux' || prefs.process === 'f3ul') return;
   if (!detectedCrossFace) return;
   if (f2lSlotsEverDone >= 4) return;
   const crossIdx = phaseSeq.findIndex(p => p.key === 'cross');
@@ -1438,6 +1584,10 @@ function finishSolve() {
     process: prefs.process,
     twoLookOll: prefs.twoLookOll,
     twoLookPll: prefs.twoLookPll,
+    // Roux-specific toggles — only stored on Roux records to keep
+    // CFOP/F3uL/Beginner record shape unchanged.
+    ...(prefs.process === 'roux' ? { twoLookCmll: prefs.twoLookCmll } : {}),
+    ...(prefs.process === 'roux' ? { threeLookLse: prefs.threeLookLse } : {}),
     turns: solveTurns.slice(),
     // Only attach when we actually recorded splits — keeps records small
     // for runs that didn't hit the F2L phase (e.g. beginner mode).
@@ -2447,6 +2597,16 @@ const PHASE_COLOR_BY_KEY: Record<string, string> = {
   pll:   PHASE_COLORS[5],
   setup: PHASE_COLORS[0],
   ll:    PHASE_COLORS[4],
+  // Roux / F3uL
+  f1b:   PHASE_COLORS[0],
+  f2b:   PHASE_COLORS[1],
+  fml:   PHASE_COLORS[7],
+  opll:  PHASE_COLORS[4],
+  cmll:  PHASE_COLORS[4],   // aggregate uses OPLL's color (top of stack)
+  lseo:  PHASE_COLORS[2],
+  lre:   PHASE_COLORS[6],
+  opme:  PHASE_COLORS[5],
+  lse:   PHASE_COLORS[5],   // aggregate uses OPME's color
 };
 
 let turnGraphPopupChart: Chart | null = null;
@@ -2877,6 +3037,22 @@ function wireEvents() {
     renderGraph();
   });
 
+  fsTwoLookCmllEl()?.addEventListener('change', () => {
+    prefs.twoLookCmll = !!fsTwoLookCmllEl()?.checked;
+    savePrefs();
+    renderStatsLegend();
+    renderStatsBoxes();
+    renderGraph();
+  });
+
+  fsThreeLookLseEl()?.addEventListener('change', () => {
+    prefs.threeLookLse = !!fsThreeLookLseEl()?.checked;
+    savePrefs();
+    renderStatsLegend();
+    renderStatsBoxes();
+    renderGraph();
+  });
+
   // "Share scrambles" — toggling on broadcasts our current + future
   // scrambles to the partner. The setter handles "claim" semantics and
   // also kicks off an immediate broadcast of currentScramble so the
@@ -3019,6 +3195,8 @@ function applyPrefsToUI() {
   const i = fsInspectionEl(); if (i) i.value = prefs.inspection;
   const ol = fsTwoLookOllEl(); if (ol) ol.checked = prefs.twoLookOll;
   const pl = fsTwoLookPllEl(); if (pl) pl.checked = prefs.twoLookPll;
+  const cm = fsTwoLookCmllEl(); if (cm) cm.checked = prefs.twoLookCmll;
+  const ls = fsThreeLookLseEl(); if (ls) ls.checked = prefs.threeLookLse;
   // Slider range is fixed: 20 (min) to 500 (HISTORY_CAP). When history is
   // shorter than the chosen range, renderGraph() clamps to history.length.
   if (prefs.graphRange < 10 || prefs.graphRange > 500) {

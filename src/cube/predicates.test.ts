@@ -4,6 +4,9 @@ import {
   CROSS_ADJ, F2L_BAND, F2L_SLOTS, HEADLIGHT,
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
   f2lSlotsDoneOn, isAnyEdgeCrossOn, firstMatchingFace,
+  isRouxFirstBlockDoneOn, isRouxSecondBlockDoneOn,
+  areTopCornersOrientedOn, isLSEOrientedOn, isLREDoneOn,
+  EDGE_DS,
 } from './predicates';
 
 // Solved cube using face letters as colors (URFDLB layout, 9 stickers each).
@@ -267,5 +270,169 @@ describe('firstMatchingFace', () => {
     let s = SOLVED;
     for (const f of FACES) s = setSticker(s, f, 1, '?'); // break top edge of each face
     expect(firstMatchingFace(s, isCrossDoneOn)).toBeNull();
+  });
+});
+
+// ---------- Roux / F3uL predicates ----------
+
+describe('EDGE_DS structural', () => {
+  it('every face has 4 side-face entries (excludes self + opposite)', () => {
+    for (const f of FACES) {
+      const keys = Object.keys(EDGE_DS[f]) as Face[];
+      expect(keys).toHaveLength(4);
+      for (const s of keys) {
+        expect(s).not.toBe(f);
+        expect(s).not.toBe(OPPOSITE[f]);
+      }
+    }
+  });
+
+  it('all stored indices are valid edge positions (1, 3, 5, or 7)', () => {
+    for (const f of FACES) {
+      for (const idx of Object.values(EDGE_DS[f])) {
+        expect([1, 3, 5, 7]).toContain(idx);
+      }
+    }
+  });
+});
+
+describe('Roux predicates on a solved cube', () => {
+  it('isRouxFirstBlockDoneOn returns true for every (d, side) pair', () => {
+    for (const d of FACES) {
+      for (const s of FACES) {
+        if (s === d || s === OPPOSITE[d]) continue;
+        expect(isRouxFirstBlockDoneOn(d, s, SOLVED)).toBe(true);
+      }
+    }
+  });
+
+  it('isRouxSecondBlockDoneOn returns true for every (d, s1) pair', () => {
+    for (const d of FACES) {
+      for (const s of FACES) {
+        if (s === d || s === OPPOSITE[d]) continue;
+        expect(isRouxSecondBlockDoneOn(d, s, SOLVED)).toBe(true);
+      }
+    }
+  });
+
+  it('areTopCornersOrientedOn returns true for every face', () => {
+    for (const f of FACES) expect(areTopCornersOrientedOn(f, SOLVED)).toBe(true);
+  });
+
+  it('isLSEOrientedOn returns true for every (d, s1) pair', () => {
+    for (const d of FACES) {
+      for (const s of FACES) {
+        if (s === d || s === OPPOSITE[d]) continue;
+        expect(isLSEOrientedOn(d, s, SOLVED)).toBe(true);
+      }
+    }
+  });
+
+  it('isLREDoneOn returns true for every (d, s1) pair', () => {
+    for (const d of FACES) {
+      for (const s of FACES) {
+        if (s === d || s === OPPOSITE[d]) continue;
+        expect(isLREDoneOn(d, s, SOLVED)).toBe(true);
+      }
+    }
+  });
+});
+
+describe('isRouxFirstBlockDoneOn — partial states', () => {
+  it('rejects when sideFace equals downFace or its opposite', () => {
+    expect(isRouxFirstBlockDoneOn('D', 'D', SOLVED)).toBe(false);
+    expect(isRouxFirstBlockDoneOn('D', 'U', SOLVED)).toBe(false);
+  });
+
+  it('fails when the DS cross edge is wrong (D-side)', () => {
+    // For D=D, S=L, DS sticker = D[3]. Break it.
+    const s = setSticker(SOLVED, 'D', 3, '?');
+    expect(isRouxFirstBlockDoneOn('D', 'L', s)).toBe(false);
+    // R-side block unaffected.
+    expect(isRouxFirstBlockDoneOn('D', 'R', s)).toBe(true);
+  });
+
+  it('fails when the side face\'s bottom band is wrong', () => {
+    // Break L[8] (FL corner L-side).
+    const s = setSticker(SOLVED, 'L', 8, '?');
+    expect(isRouxFirstBlockDoneOn('D', 'L', s)).toBe(false);
+  });
+
+  it('survives top-half damage on the side face (only bottom 2 rows matter)', () => {
+    // Break L[0], L[1], L[2] (top row of L face).
+    let s = setSticker(SOLVED, 'L', 0, '?');
+    s = setSticker(s, 'L', 1, '?');
+    s = setSticker(s, 'L', 2, '?');
+    expect(isRouxFirstBlockDoneOn('D', 'L', s)).toBe(true);
+  });
+
+  it('detects color-neutral block on any face', () => {
+    // First-block detection should find every (d, s) on a solved cube.
+    let found = 0;
+    for (const d of FACES) for (const s of FACES) {
+      if (s === d || s === OPPOSITE[d]) continue;
+      if (isRouxFirstBlockDoneOn(d, s, SOLVED)) found++;
+    }
+    // 6 faces * 4 side-faces = 24 valid (d, s) combos.
+    expect(found).toBe(24);
+  });
+});
+
+describe('isRouxSecondBlockDoneOn', () => {
+  it('fails when only the first block is done (other side missing)', () => {
+    // Break the opposite-side block by wrecking R[8] (FR corner R-side).
+    const s = setSticker(SOLVED, 'R', 8, '?');
+    expect(isRouxFirstBlockDoneOn('D', 'L', s)).toBe(true);   // L block intact
+    expect(isRouxSecondBlockDoneOn('D', 'L', s)).toBe(false); // R block broken
+  });
+
+  it('symmetric: s1=L and s1=R agree', () => {
+    expect(isRouxSecondBlockDoneOn('D', 'L', SOLVED)).toBe(true);
+    expect(isRouxSecondBlockDoneOn('D', 'R', SOLVED)).toBe(true);
+  });
+});
+
+describe('areTopCornersOrientedOn — corners only', () => {
+  it('passes when only the 4 top corners show top-color (edges may be wrong)', () => {
+    // Break the 4 top edges of U (indices 1, 3, 5, 7).
+    let s = SOLVED;
+    s = setSticker(s, 'U', 1, '?');
+    s = setSticker(s, 'U', 3, '?');
+    s = setSticker(s, 'U', 5, '?');
+    s = setSticker(s, 'U', 7, '?');
+    // CFOP's OLL predicate would reject this (face not mono); Roux's
+    // CMLL-orientation predicate accepts it (only corners matter).
+    expect(isOllDoneOn('D', s)).toBe(false);
+    expect(areTopCornersOrientedOn('D', s)).toBe(true);
+  });
+
+  it('fails when even one top corner is wrong', () => {
+    const s = setSticker(SOLVED, 'U', 0, '?');
+    expect(areTopCornersOrientedOn('D', s)).toBe(false);
+  });
+});
+
+describe('isLSEOrientedOn — false-positive resistance', () => {
+  it('fails when a mid-slice down-side edge is wrong (e.g., DF flipped)', () => {
+    // For D=D, S=L, mid-slice axis is F-B. The DF down-sticker is D[1].
+    const s = setSticker(SOLVED, 'D', 1, '?');
+    expect(isLSEOrientedOn('D', 'L', s)).toBe(false);
+  });
+
+  it('fails when a top edge is wrong', () => {
+    const s = setSticker(SOLVED, 'U', 1, '?');
+    expect(isLSEOrientedOn('D', 'L', s)).toBe(false);
+  });
+});
+
+describe('isLREDoneOn', () => {
+  it('passes when both L/R "top" edges show their side-color', () => {
+    expect(isLREDoneOn('D', 'L', SOLVED)).toBe(true);
+  });
+
+  it('fails when one of the L/R top edges has wrong side-face sticker', () => {
+    // For D=D, S1=L: L's "top edge toward U" = L[1]. Break it.
+    const s = setSticker(SOLVED, 'L', 1, '?');
+    expect(isLREDoneOn('D', 'L', s)).toBe(false);
   });
 });

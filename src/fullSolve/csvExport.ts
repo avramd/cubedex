@@ -22,6 +22,88 @@ export function phaseAtMs(r: SolveRecord, t_ms: number): string {
     if (t_ms < setupMs + llMs) return 'll';
     return 'solved';
   }
+  if (r.process === 'roux') {
+    // Order: f1b → f2b → CMLL (split: ocll+opll or aggregate: cmll) →
+    // LSE (split: lseo+lre+opme or aggregate: lse).
+    let cursor = 0;
+    const f1b = p.f1b ?? 0;
+    if (t_ms < cursor + f1b) return 'f1b';
+    cursor += f1b;
+    const f2b = p.f2b ?? 0;
+    if (t_ms < cursor + f2b) return 'f2b';
+    cursor += f2b;
+    const ocll = p.ocll ?? 0;
+    const opll = p.opll ?? 0;
+    const cmllSplit = ocll > 0 || opll > 0;
+    if (cmllSplit) {
+      if (t_ms < cursor + ocll) return 'ocll';
+      cursor += ocll;
+      if (t_ms < cursor + opll) return 'opll';
+      cursor += opll;
+    } else {
+      const cmll = p.cmll ?? 0;
+      if (t_ms < cursor + cmll) return 'cmll';
+      cursor += cmll;
+    }
+    const lseo = p.lseo ?? 0;
+    const lre  = p.lre  ?? 0;
+    const opme = p.opme ?? 0;
+    const lseSplit = lseo > 0 || lre > 0 || opme > 0;
+    if (lseSplit) {
+      if (t_ms < cursor + lseo) return 'lseo';
+      cursor += lseo;
+      if (t_ms < cursor + lre) return 'lre';
+      cursor += lre;
+      if (t_ms < cursor + opme) return 'opme';
+      cursor += opme;
+    } else {
+      const lse = p.lse ?? 0;
+      if (t_ms < cursor + lse) return 'lse';
+      cursor += lse;
+    }
+    return 'solved';
+  }
+  if (r.process === 'f3ul') {
+    // Order: f1b → f2b → fml → OLL (split or aggregate) → PLL (split or aggregate).
+    let cursor = 0;
+    const f1b = p.f1b ?? 0;
+    if (t_ms < cursor + f1b) return 'f1b';
+    cursor += f1b;
+    const f2b = p.f2b ?? 0;
+    if (t_ms < cursor + f2b) return 'f2b';
+    cursor += f2b;
+    const fml = p.fml ?? 0;
+    if (t_ms < cursor + fml) return 'fml';
+    cursor += fml;
+    // LL identical to CFOP semantics from here on.
+    const eollMs = p.eoll ?? 0;
+    const ocllMs = p.ocll ?? 0;
+    const cpllMs = p.cpll ?? 0;
+    const epllMs = p.epll ?? 0;
+    const ollSplit = eollMs > 0 || ocllMs > 0;
+    const pllSplit = cpllMs > 0 || epllMs > 0;
+    if (ollSplit) {
+      if (t_ms < cursor + eollMs) return 'eoll';
+      cursor += eollMs;
+      if (t_ms < cursor + ocllMs) return 'ocll';
+      cursor += ocllMs;
+    } else {
+      const ollMs = p.oll ?? 0;
+      if (t_ms < cursor + ollMs) return 'oll';
+      cursor += ollMs;
+    }
+    if (pllSplit) {
+      if (t_ms < cursor + cpllMs) return 'cpll';
+      cursor += cpllMs;
+      if (t_ms < cursor + epllMs) return 'epll';
+      cursor += epllMs;
+    } else {
+      const pllMs = p.pll ?? 0;
+      if (t_ms < cursor + pllMs) return 'pll';
+      cursor += pllMs;
+    }
+    return 'solved';
+  }
   const crossMs = p.cross ?? 0;
   if (t_ms < crossMs) return 'cross';
   const f2lMs = p.f2l ?? 0;

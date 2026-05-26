@@ -175,3 +175,139 @@ export function firstMatchingFace(
   for (const f of FACES) if (predOn(f, facelets)) return f;
   return null;
 }
+
+// ---------- Roux / F3uL predicates ----------
+//
+// Roux solves the cube in two opposite 1x2x3 blocks (F1B, F2B), then
+// the top corners (CMLL — corners only, top edges ignored), then the
+// last six edges (LSE). F3uL reuses Roux's F1B + F2B but follows with
+// FML (which makes the bottom 2 layers identical to CFOP's F2L-done
+// state) and then standard CFOP OLL/PLL.
+//
+// Every predicate is parameterised by the user's down-face and (where
+// relevant) the first-block side-face, mirroring the existing
+// CROSS_ADJ / F2L_SLOTS pattern.
+
+// D-face sticker index for the edge between D and S. Derived per face's
+// Kociemba orientation: each face's 4 edge stickers live at indices
+// 1, 3, 5, 7; this table just records which one corresponds to which
+// side. (See CROSS_ADJ which gives the SIDE-face index of the same
+// edge; this table gives the DOWN-face index.)
+export const EDGE_DS: Record<Face, Partial<Record<Face, number>>> = {
+  D: { F: 1, L: 3, R: 5, B: 7 },
+  U: { B: 1, L: 3, R: 5, F: 7 },
+  F: { U: 1, L: 3, R: 5, D: 7 },
+  B: { U: 1, R: 3, L: 5, D: 7 },
+  R: { U: 1, F: 3, B: 5, D: 7 },
+  L: { U: 1, B: 3, F: 5, D: 7 },
+};
+
+// Given (downFace, sideFace), return the indices into F2L_SLOTS[D] of
+// the two F2L slots that fall on S's side of D. Hand-built because the
+// F2L_SLOTS rows differ per face and the "which slot is on which side"
+// mapping isn't structural.
+const ROUX_BLOCK_SLOT_INDICES: Record<Face, Partial<Record<Face, [number, number]>>> = {
+  // D row: [FR, FL, BR, BL]
+  D: { F: [0, 1], B: [2, 3], L: [1, 3], R: [0, 2] },
+  // U row: [FR, FL, BR, BL]
+  U: { F: [0, 1], B: [2, 3], L: [1, 3], R: [0, 2] },
+  // F row: [UL, UR, DL, DR]
+  F: { U: [0, 1], D: [2, 3], L: [0, 2], R: [1, 3] },
+  // B row: [UR, UL, DR, DL]
+  B: { U: [0, 1], D: [2, 3], R: [0, 2], L: [1, 3] },
+  // R row: [UF, UB, DF, DB]
+  R: { U: [0, 1], D: [2, 3], F: [0, 2], B: [1, 3] },
+  // L row: [UF, UB, DF, DB]
+  L: { U: [0, 1], D: [2, 3], F: [0, 2], B: [1, 3] },
+};
+
+// Check that every sticker in `pairs` matches its own face's center.
+function allStickersMatchCenter(facelets: string, pairs: Array<[Face, number]>): boolean {
+  for (const [face, idx] of pairs) {
+    const s = faceStickers(facelets, face);
+    if (s[idx] !== s[4]) return false;
+  }
+  return true;
+}
+
+// 1x2x3 block on side S of down-face D. Block covers: S-face's bottom
+// 2 rows (F2L_BAND), the 2 F2L slots on S's side of D (corners + their
+// vertical edges to F/B), AND the DS cross edge (D's S-side sticker).
+export function isRouxFirstBlockDoneOn(d: Face, s: Face, facelets: string): boolean {
+  if (s === d || s === OPPOSITE[d]) return false;
+  const slotIdx = ROUX_BLOCK_SLOT_INDICES[d]?.[s];
+  if (!slotIdx) return false;
+  // 1. S-face band (6 stickers in S's bottom 2 rows, including DS edge S-side).
+  for (const [side, indices] of F2L_BAND[d]) {
+    if (side !== s) continue;
+    const ss = faceStickers(facelets, side);
+    const c = ss[4];
+    for (const i of indices) if (ss[i] !== c) return false;
+  }
+  // 2. The 2 S-side F2L slots (each: cross-face corner sticker + 4
+  //    side-face stickers covering corner + vertical edge).
+  for (const idx of slotIdx) {
+    if (!allStickersMatchCenter(facelets, F2L_SLOTS[d][idx])) return false;
+  }
+  // 3. DS cross edge — D-face sticker (S-face side is in the band check above).
+  const dsIdx = EDGE_DS[d]?.[s];
+  if (dsIdx === undefined) return false;
+  const ds = faceStickers(facelets, d);
+  if (ds[dsIdx] !== ds[4]) return false;
+  return true;
+}
+
+// Both blocks done (F2B). The 2nd block is on the OPPOSITE side from
+// the 1st (`s1`). Identical to "first block done on s1 AND first block
+// done on opp(s1)" — the predicate is symmetric in the two blocks.
+export function isRouxSecondBlockDoneOn(d: Face, s1: Face, facelets: string): boolean {
+  return isRouxFirstBlockDoneOn(d, s1, facelets)
+      && isRouxFirstBlockDoneOn(d, OPPOSITE[s1], facelets);
+}
+
+// OCLL (Roux/CMLL corner orientation): the 4 corner stickers of the
+// opposite-of-d face (indices 0, 2, 6, 8) all show opp(d)-center color.
+// CRUCIALLY DIFFERENT from isOllDoneOn (which also requires the 4 edge
+// stickers to match) — in Roux, CMLL only solves corners; the edges of
+// the top face are handled later in LSE.
+export function areTopCornersOrientedOn(d: Face, facelets: string): boolean {
+  const top = faceStickers(facelets, OPPOSITE[d]);
+  const c = top[4];
+  return top[0] === c && top[2] === c && top[6] === c && top[8] === c;
+}
+
+// LSEO — last 6 edges oriented. The 4 top-edge stickers on opp(d) show
+// opp(d)-color, AND the 2 mid-slice D-side stickers (the F/B-axis edges
+// when blocks are on L/R, or vice versa) show d-color.
+export function isLSEOrientedOn(d: Face, s1: Face, facelets: string): boolean {
+  // 4 top edges of opp(d).
+  const top = faceStickers(facelets, OPPOSITE[d]);
+  const tc = top[4];
+  if (top[1] !== tc || top[3] !== tc || top[5] !== tc || top[7] !== tc) return false;
+  // 2 mid-slice D-side stickers: the side-faces perpendicular to s1.
+  const sides = (F2L_BAND[d].map(([f]) => f) as Face[])
+    .filter(f => f !== s1 && f !== OPPOSITE[s1]);
+  const ds = faceStickers(facelets, d);
+  const dc = ds[4];
+  for (const side of sides) {
+    const dsIdx = EDGE_DS[d]?.[side];
+    if (dsIdx === undefined) return false;
+    if (ds[dsIdx] !== dc) return false;
+  }
+  return true;
+}
+
+// LRE — LSEO done AND the 2 "top edges of the side faces" (the edges
+// between s1 / opp(s1) and opp(d)) are placed. Sticker check: s1's
+// edge-toward-opp(d) sticker matches s1-center; same for opp(s1).
+export function isLREDoneOn(d: Face, s1: Face, facelets: string): boolean {
+  if (!isLSEOrientedOn(d, s1, facelets)) return false;
+  const top = OPPOSITE[d];
+  for (const side of [s1, OPPOSITE[s1]] as Face[]) {
+    const idx = EDGE_DS[side]?.[top];
+    if (idx === undefined) return false;
+    const ss = faceStickers(facelets, side);
+    if (ss[idx] !== ss[4]) return false;
+  }
+  return true;
+}

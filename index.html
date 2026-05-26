@@ -572,6 +572,8 @@
                 <label for="fs-process-select" class="text-sm sm:text-base text-gray-900 block mb-1 dark:text-white">Process:</label>
                 <select id="fs-process-select" class="p-2 border border-gray-400 rounded-lg bg-white text-gray-900 shadow-md dark:bg-gray-600 dark:text-white dark:border-gray-700 focus:border-gray-400 text-sm sm:text-base">
                   <option value="cfop">CFOP</option>
+                  <option value="roux">Roux</option>
+                  <option value="f3ul">F3uL</option>
                   <option value="beginner">Beginner</option>
                 </select>
               </div>
@@ -609,6 +611,19 @@
                   <label class="flex items-center gap-2">
                     <input type="checkbox" id="fs-twolook-pll-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
                     <span>2-look PLL</span>
+                  </label>
+                </div>
+              </div>
+              <!-- Roux-only toggles: shown when process == roux. -->
+              <div id="fs-roux-options" class="hidden flex-col gap-1 justify-end text-xs sm:text-sm">
+                <div class="flex flex-wrap gap-3">
+                  <label class="flex items-center gap-2">
+                    <input type="checkbox" id="fs-twolook-cmll-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>2-look CMLL</span>
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <input type="checkbox" id="fs-threelook-lse-toggle" class="form-checkbox h-4 w-4 text-blue-600" />
+                    <span>3-look LSE</span>
                   </label>
                 </div>
               </div>

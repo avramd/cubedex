@@ -5,6 +5,10 @@ export const PHASE_KEY_LABELS: Record<string, string> = {
   cross: 'Cross', f2l: 'F2L', oll: 'OLL', pll: 'PLL',
   eoll: 'EOLL', ocll: 'OCLL', cpll: 'CPLL', epll: 'EPLL',
   setup: 'Setup', ll: 'LL',
+  // Roux / F3uL
+  f1b: '1st Block', f2b: '2nd Block', fml: 'FML',
+  cmll: 'CMLL', opll: 'OPLL',
+  lse: 'LSE', lseo: 'LSEO', lre: 'LRE', opme: 'OPME',
 };
 
 // Look up a phase's milliseconds from a stored record, given the *display*

@@ -26,7 +26,7 @@
 //   - If it's derivable from existing fields: extend recomputeMissingSplitsFor
 //     in fullSolve.ts so old exports can be imported and re-derive it.
 
-export type Process = 'cfop' | 'beginner';
+export type Process = 'cfop' | 'beginner' | 'roux' | 'f3ul';
 
 export interface SolveRecord {
   ts: number;        // Unix ms
@@ -74,4 +74,10 @@ export interface SolveRecord {
   // straightforward. Absent / empty array = untagged. Used by the
   // graph tag filter and shown as chips on history rows.
   tags?: string[];
+  // Roux-specific: split CMLL into OCLL (corners oriented) + OPLL
+  // (corner-permutation headlights). Only meaningful when process is 'roux'.
+  twoLookCmll?: boolean;
+  // Roux-specific: split LSE into LSEO → LRE → OPME (3-look LSE).
+  // Only meaningful when process is 'roux'.
+  threeLookLse?: boolean;
 }
