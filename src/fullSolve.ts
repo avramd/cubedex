@@ -3385,16 +3385,23 @@ function renderSolveList() {
     // omitted entirely otherwise to keep the row tidy.
     if ((r.process === 'roux' || r.process === 'f3ul') && r.turns && r.turns.length > 0) {
       const recompute = document.createElement('button');
-      recompute.className = 'fs-alt-only leading-none text-xs px-0.5 text-gray-400 hover:text-blue-500';
+      recompute.className = 'fs-alt-only leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
       recompute.textContent = '🔄';
       recompute.title = 'Recompute pair timings for this solve (option/alt-held)';
       recompute.addEventListener('click', (e) => {
         e.stopPropagation();
         const changed = recomputeRouxPairTimingsFor(history[realIdx]);
+        // Visible confirmation so the user knows the click registered.
         if (changed) {
+          recompute.textContent = '✅';
           saveHistory();
           renderAllFilterDependent();
+        } else {
+          recompute.textContent = '⚠️';
+          recompute.title = 'No change — this solve may lack per-turn timing data.';
         }
+        // Restore after a beat (but only if the row hasn't been re-rendered).
+        setTimeout(() => { recompute.textContent = '🔄'; }, 900);
       });
       row.appendChild(recompute);
     }
@@ -4401,13 +4408,20 @@ export function initFullSolve() {
   // Global option/alt-key tracking. Adds `fs-alt-down` to <body> while
   // the key is held; CSS rules in tailwind.css reveal `.fs-alt-only`
   // affordances (currently: the per-row pair-timing recompute icon).
-  // Clears the class on blur / visibility change so we don't get stuck
-  // showing the affordance after an alt-tab away.
+  // Uses getModifierState which reflects the up-to-the-moment alt
+  // state on both keydown and keyup of EVERY key — more reliable than
+  // checking e.altKey, which on some browsers is briefly out of sync
+  // on the keydown of Alt itself.
   const setAltState = (down: boolean) => {
     document.body.classList.toggle('fs-alt-down', down);
   };
-  document.addEventListener('keydown', (e) => { if (e.altKey) setAltState(true); });
-  document.addEventListener('keyup', (e) => { if (!e.altKey) setAltState(false); });
+  const readAltFromEvent = (e: KeyboardEvent) =>
+    setAltState(!!(e.getModifierState?.('Alt') ?? e.altKey)
+                || e.key === 'Alt' && e.type === 'keydown');
+  document.addEventListener('keydown', readAltFromEvent);
+  document.addEventListener('keyup', readAltFromEvent);
+  // Belt + suspenders: clear on any state change that could leave us
+  // stuck with the class on but no key pressed.
   window.addEventListener('blur', () => setAltState(false));
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) setAltState(false);
