@@ -3388,8 +3388,14 @@ function renderSolveList() {
       recompute.className = 'fs-alt-only leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
       recompute.textContent = '🔄';
       recompute.title = 'Recompute pair timings for this solve (option/alt-held)';
-      recompute.addEventListener('click', (e) => {
+      // pointerdown rather than click: if the user releases option
+      // between mousedown and mouseup, the button becomes display:none
+      // before the click event fires (browsers don't dispatch click on
+      // elements that aren't in the rendering tree). pointerdown fires
+      // immediately on press, while the button is guaranteed visible.
+      recompute.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const changed = recomputeRouxPairTimingsFor(history[realIdx]);
         // Visible confirmation so the user knows the click registered.
         if (changed) {
