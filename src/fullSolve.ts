@@ -449,16 +449,29 @@ function backfillF2lSplits() {
   }
 }
 
+// Pair timings recorded by an earlier (buggy) version collapsed pairs
+// 1+2 to the same ms (and 3+4 the same) because down-face wasn't
+// locked until block-1 was done. Detect that signature so we can
+// recompute over the affected records — equal adjacent pair times
+// almost never happen genuinely (would require two pair completions
+// on a single physical move).
+function hasCollapsedPairTimings(arr?: number[]): boolean {
+  if (!arr || arr.length < 2) return false;
+  for (let i = 1; i < arr.length; i++) if (arr[i] === arr[i - 1]) return true;
+  return false;
+}
+
 // Roux/F3uL pair-timing backfill — populates rouxPairTimingsMs and
 // rouxBlock{1,2}FirstPairMs by replaying the recorded scramble +
-// solution. Records that already have these fields are left alone.
-// Records without r.turns can't be back-timed and are skipped.
+// solution. Skips records that already have plausible data. Records
+// without r.turns can't be back-timed and are skipped.
 function backfillRouxPairTimings() {
   if (!kpuzzle) return;
   let updated = 0;
   for (const r of history) {
     if (r.process !== 'roux' && r.process !== 'f3ul') continue;
-    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0) continue;
+    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0
+        && !hasCollapsedPairTimings(r.rouxPairTimingsMs)) continue;
     if (!r.turns || r.turns.length === 0) continue;
     let pat = kpuzzle.defaultPattern();
     let badScramble = false;
@@ -484,17 +497,32 @@ function backfillRouxPairTimings() {
       try { facelets = patternToFacelets(pat); } catch { continue; }
       const tIdx = Math.min(physIdx, r.turns.length) - 1;
       const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
-      // Detect/lock down-face + 1st-block side.
+      // Lock the down-face on the FIRST pair completion (any of 6 ×
+      // 4 candidate (d, slot) combos). Without this early lock, pairs
+      // 1 + 2 of the 1st block can't be detected individually and
+      // both end up timestamped at the block-done moment.
       if (!down) {
-        for (const d of FACES) {
-          for (const s of FACES) {
-            if (s === d || s === OPPOSITE[d]) continue;
-            if (isRouxFirstBlockDoneOn(d, s, facelets)) { down = d; side1 = s; break; }
+        outer: for (const candidate of FACES) {
+          const slots = F2L_SLOTS[candidate];
+          for (let i = 0; i < slots.length; i++) {
+            let allMatch = true;
+            for (const [sideFace, idx] of slots[i]) {
+              const s = faceStickers(facelets, sideFace);
+              if (s[idx] !== s[4]) { allMatch = false; break; }
+            }
+            if (allMatch) { down = candidate; break outer; }
           }
-          if (down) break;
         }
       }
       if (!down) continue;
+      // Lock the 1st-block side independently — fires the moment a
+      // full 1x2x3 is formed (same logic as the live wrapper).
+      if (!side1) {
+        for (const s of FACES) {
+          if (s === down || s === OPPOSITE[down]) continue;
+          if (isRouxFirstBlockDoneOn(down, s, facelets)) { side1 = s; break; }
+        }
+      }
       // Record any newly-completed pairs.
       const slots = F2L_SLOTS[down];
       for (let i = 0; i < slots.length; i++) {
@@ -639,9 +667,24 @@ let detectedDownFace: Face | null = null;
 let detectedRouxSide1: Face | null = null;
 
 function isFirstBlockDone(facelets: string): boolean {
+  // Both anchors locked — fast dispatch.
   if (detectedDownFace && detectedRouxSide1) {
     return isRouxFirstBlockDoneOn(detectedDownFace, detectedRouxSide1, facelets);
   }
+  // downFace already locked by sampleRouxPairProgression (which fires
+  // on the FIRST pair) but side1 isn't — search only sides on the
+  // locked downFace, never overwrite downFace.
+  if (detectedDownFace) {
+    for (const s of FACES) {
+      if (s === detectedDownFace || s === OPPOSITE[detectedDownFace]) continue;
+      if (isRouxFirstBlockDoneOn(detectedDownFace, s, facelets)) {
+        detectedRouxSide1 = s;
+        return true;
+      }
+    }
+    return false;
+  }
+  // Cold start — color-neutral search across all 24 (d, s) combos.
   for (const d of FACES) {
     for (const s of FACES) {
       if (s === d || s === OPPOSITE[d]) continue;
@@ -1828,14 +1871,38 @@ function sampleF2lSlotProgression(facelets: string, now: number) {
 // Roux/F3uL analog. Tracks per-PAIR completion (not just count) so we
 // can attribute each pair to block 1 vs block 2 once the corresponding
 // block-done predicate fires. Uses F2L_SLOTS[D] directly to identify
-// which specific slot just completed (the existing f2lSlotsDoneOn
-// returns only the count). detectedDownFace is locked by isFirstBlockDone.
+// which specific slot just completed.
+//
+// CRITICAL: this runs BEFORE detectedDownFace is set by isFirstBlockDone
+// (the block-done predicate fires only when BOTH pairs + the cross
+// edge are in place). To capture pair-1 and pair-2 timings as they
+// happen — not at the moment block-1 completes — we color-neutrally
+// scan all 6 candidate down-faces × 4 slots until we find a done
+// slot, then lock detectedDownFace for the rest of the solve.
 function sampleRouxPairProgression(facelets: string, now: number) {
   if (prefs.process !== 'roux' && prefs.process !== 'f3ul') return;
-  if (!detectedDownFace) return;
   if (solveRouxPairTimingsMs.length >= 4) return;
-  const slots = F2L_SLOTS[detectedDownFace];
   const msFromStart = now - solveStartMs;
+
+  // First-pair-anywhere detection: lock detectedDownFace as soon as
+  // ANY slot is done against ANY candidate down-face. Subsequent moves
+  // dispatch against the locked face only.
+  if (!detectedDownFace) {
+    outer: for (const candidate of FACES) {
+      const slots = F2L_SLOTS[candidate];
+      for (let i = 0; i < slots.length; i++) {
+        let allMatch = true;
+        for (const [sideFace, idx] of slots[i]) {
+          const s = faceStickers(facelets, sideFace);
+          if (s[idx] !== s[4]) { allMatch = false; break; }
+        }
+        if (allMatch) { detectedDownFace = candidate; break outer; }
+      }
+    }
+    if (!detectedDownFace) return;  // no pair yet
+  }
+
+  const slots = F2L_SLOTS[detectedDownFace];
   for (let i = 0; i < slots.length; i++) {
     if (solveRouxPairSlotsDoneMask & (1 << i)) continue;
     let allMatch = true;
