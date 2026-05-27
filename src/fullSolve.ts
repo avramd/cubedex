@@ -4409,13 +4409,30 @@ export function initFullSolve() {
   // browser doesn't deliver pointerdown for some reason.
   const handleRecomputeClick = (e: Event) => {
     const t = e.target as HTMLElement | null;
-    const btn = t?.closest?.('.fs-recompute-btn') as HTMLButtonElement | null;
+    // First search via closest() (button itself or ancestor). Fall
+    // back to elementsFromPoint at the click coords, since an overlay
+    // can deliver the event to itself rather than the button beneath.
+    let btn = t?.closest?.('.fs-recompute-btn') as HTMLButtonElement | null;
+    if (!btn && (e as PointerEvent).clientX !== undefined) {
+      const ev = e as PointerEvent;
+      const stack = document.elementsFromPoint(ev.clientX, ev.clientY);
+      for (const el of stack) {
+        if ((el as HTMLElement).classList?.contains('fs-recompute-btn')) {
+          btn = el as HTMLButtonElement;
+          break;
+        }
+      }
+    }
+    console.log('[fs-recompute]', e.type, 'target=', t?.tagName, t?.className,
+                'matched=', !!btn);
     if (!btn) return;
     e.stopPropagation();
     e.preventDefault();
     const realIdx = parseInt(btn.dataset.realIdx ?? '-1', 10);
     if (realIdx < 0 || realIdx >= history.length) return;
     const changed = recomputeRouxPairTimingsFor(history[realIdx]);
+    console.log('[fs-recompute] result:', { changed, realIdx,
+      rouxPairTimingsMs: history[realIdx].rouxPairTimingsMs });
     if (changed) {
       btn.textContent = '✅';
       saveHistory();
@@ -4428,6 +4445,35 @@ export function initFullSolve() {
   };
   document.addEventListener('pointerdown', handleRecomputeClick, { capture: true });
   document.addEventListener('click', handleRecomputeClick, { capture: true });
+
+  // Window-level diagnostic for opt-click failures: from the dev
+  // console run `__fsRecomputeLatest()` to replay-recompute the most
+  // recent Roux/F3uL solve, bypassing all UI plumbing. Logs the
+  // before/after pair-timings so you can see whether the issue is in
+  // the recompute function or in the click chain.
+  (window as unknown as { __fsRecomputeLatest?: () => void }).__fsRecomputeLatest = () => {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const r = history[i];
+      if (r.process !== 'roux' && r.process !== 'f3ul') continue;
+      console.log('[fs-recompute] before:', JSON.parse(JSON.stringify({
+        process: r.process,
+        rouxPairTimingsMs: r.rouxPairTimingsMs,
+        rouxBlock1FirstPairMs: r.rouxBlock1FirstPairMs,
+        rouxBlock2FirstPairMs: r.rouxBlock2FirstPairMs,
+      })));
+      const changed = recomputeRouxPairTimingsFor(r);
+      console.log('[fs-recompute] after:', { changed,
+        rouxPairTimingsMs: r.rouxPairTimingsMs,
+        rouxBlock1FirstPairMs: r.rouxBlock1FirstPairMs,
+        rouxBlock2FirstPairMs: r.rouxBlock2FirstPairMs });
+      if (changed) {
+        saveHistory();
+        renderAllFilterDependent();
+      }
+      return;
+    }
+    console.warn('[fs-recompute] no Roux/F3uL records in history');
+  };
 
   // Global option/alt-key tracking. Adds `fs-alt-down` to <body> while
   // the key is held; CSS rules in tailwind.css reveal `.fs-alt-only`
