@@ -3078,22 +3078,23 @@ function renderSolveList() {
     // squeeze. Empty when the solve has no tags.
     const tagChips = document.createElement('div');
     tagChips.className = 'flex items-center gap-1 flex-shrink-0';
-    // Process chip first — styled differently from user tags so it's
-    // visually distinguishable but still reads as a tag. Treated as a
-    // virtual auto-tag for filtering purposes (see tags.applyTagFilter).
-    if (r.process) {
-      const chip = document.createElement('span');
-      chip.className = 'px-1.5 py-0.5 rounded border border-gray-400 dark:border-gray-500 text-gray-700 dark:text-gray-200 text-[10px] sm:text-xs italic';
-      chip.textContent = r.process;
-      tagChips.appendChild(chip);
-    }
+    // User tags first; process chip last (right-most). Every solve has
+    // a process, so anchoring it at the right edge keeps method labels
+    // roughly columnar across rows, regardless of how many tags each
+    // solve has.
     if (r.tags && r.tags.length > 0) {
       for (const t of r.tags) {
         const chip = document.createElement('span');
-        chip.className = 'px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-[10px] sm:text-xs';
+        chip.className = 'px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-[10px] sm:text-xs';
         chip.textContent = t;
         tagChips.appendChild(chip);
       }
+    }
+    if (r.process) {
+      const chip = document.createElement('span');
+      chip.className = 'px-2 py-0.5 rounded-full border border-gray-400 dark:border-gray-500 text-gray-700 dark:text-gray-200 text-[10px] sm:text-xs italic';
+      chip.textContent = r.process;
+      tagChips.appendChild(chip);
     }
     row.appendChild(tagChips);
 
@@ -3656,7 +3657,7 @@ function renderTagEditorSelected() {
   el.replaceChildren();
   for (const t of tagEditorSelected) {
     const chip = document.createElement('span');
-    chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-xs';
+    chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-100 text-xs';
     chip.textContent = t;
     const x = document.createElement('button');
     x.type = 'button';
@@ -3926,7 +3927,7 @@ function renderAdvancedFilterDialog() {
     const base = reserved
       ? 'border-gray-400 dark:border-gray-500 text-gray-700 dark:text-gray-200 italic hover:bg-gray-50 dark:hover:bg-gray-700'
       : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700';
-    chip.className = `flex items-center px-2 py-1 rounded border text-xs cursor-pointer select-none ${
+    chip.className = `flex items-center px-3 py-1 rounded-full border text-xs cursor-pointer select-none ${
       selected ? 'border-blue-500 bg-blue-50 dark:bg-blue-900 ring-2 ring-blue-400' : base
     }`;
     chip.draggable = true;
