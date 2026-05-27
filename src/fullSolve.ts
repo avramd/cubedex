@@ -3383,32 +3383,19 @@ function renderSolveList() {
     // scramble + solution to re-derive rouxPairTimingsMs etc. Only
     // applicable to Roux/F3uL records with per-turn timing data;
     // omitted entirely otherwise to keep the row tidy.
+    //
+    // The actual click handler is installed once at the document
+    // level (see initFullSolve → handleRecomputeClick) with capture
+    // phase. That lets the click reach us even if any overlay sits
+    // on top of the row with pointer-events:auto, AND it survives
+    // the row being re-rendered (the button DOM nodes come and go,
+    // but the document listener is permanent).
     if ((r.process === 'roux' || r.process === 'f3ul') && r.turns && r.turns.length > 0) {
       const recompute = document.createElement('button');
-      recompute.className = 'fs-alt-only leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
+      recompute.className = 'fs-recompute-btn fs-alt-only relative z-50 leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
+      recompute.dataset.realIdx = String(realIdx);
       recompute.textContent = '🔄';
       recompute.title = 'Recompute pair timings for this solve (option/alt-held)';
-      // pointerdown rather than click: if the user releases option
-      // between mousedown and mouseup, the button becomes display:none
-      // before the click event fires (browsers don't dispatch click on
-      // elements that aren't in the rendering tree). pointerdown fires
-      // immediately on press, while the button is guaranteed visible.
-      recompute.addEventListener('pointerdown', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        const changed = recomputeRouxPairTimingsFor(history[realIdx]);
-        // Visible confirmation so the user knows the click registered.
-        if (changed) {
-          recompute.textContent = '✅';
-          saveHistory();
-          renderAllFilterDependent();
-        } else {
-          recompute.textContent = '⚠️';
-          recompute.title = 'No change — this solve may lack per-turn timing data.';
-        }
-        // Restore after a beat (but only if the row hasn't been re-rendered).
-        setTimeout(() => { recompute.textContent = '🔄'; }, 900);
-      });
       row.appendChild(recompute);
     }
 
@@ -4410,6 +4397,37 @@ export function initFullSolve() {
     renderGraph();
     renderStatsLegend();
   }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+  // Capture-phase document listener for the per-row "recompute pair
+  // timings" button. Lives at the document level so it fires BEFORE
+  // any other handler — including any pointer-events:auto overlay
+  // that might be sitting on top of the row — and survives the row
+  // being re-rendered (we only install this once at init). Uses both
+  // pointerdown and click for paranoia: pointerdown for the case
+  // where the user releases option between press and release (so the
+  // button hides before click fires), click as a fallback if the
+  // browser doesn't deliver pointerdown for some reason.
+  const handleRecomputeClick = (e: Event) => {
+    const t = e.target as HTMLElement | null;
+    const btn = t?.closest?.('.fs-recompute-btn') as HTMLButtonElement | null;
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const realIdx = parseInt(btn.dataset.realIdx ?? '-1', 10);
+    if (realIdx < 0 || realIdx >= history.length) return;
+    const changed = recomputeRouxPairTimingsFor(history[realIdx]);
+    if (changed) {
+      btn.textContent = '✅';
+      saveHistory();
+      renderAllFilterDependent();
+    } else {
+      btn.textContent = '⚠️';
+      btn.title = 'No change — this solve may lack per-turn timing data.';
+    }
+    setTimeout(() => { btn.textContent = '🔄'; }, 900);
+  };
+  document.addEventListener('pointerdown', handleRecomputeClick, { capture: true });
+  document.addEventListener('click', handleRecomputeClick, { capture: true });
 
   // Global option/alt-key tracking. Adds `fs-alt-down` to <body> while
   // the key is held; CSS rules in tailwind.css reveal `.fs-alt-only`
