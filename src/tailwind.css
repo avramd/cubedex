@@ -74,6 +74,11 @@ input:checked + div + .dot {
   padding-right: 2px;
 }
 
+/* Power-user UI affordances revealed while holding option/alt. JS adds
+ * the .fs-alt-down class to <body> on keydown and removes it on keyup. */
+.fs-alt-only { display: none; }
+body.fs-alt-down .fs-alt-only { display: inline-flex; }
+
 /* In the expanded-solution view, an italic span representing the move
  * that a same-face group reduces to. Carries a tooltip via the title
  * attribute set in JS. */

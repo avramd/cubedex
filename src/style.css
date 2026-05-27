@@ -1419,6 +1419,11 @@ video {
   padding: 1rem;
 }
 
+.px-0\.5 {
+  padding-left: 0.125rem;
+  padding-right: 0.125rem;
+}
+
 .px-1 {
   padding-left: 0.25rem;
   padding-right: 0.25rem;
@@ -1783,6 +1788,11 @@ video {
   --tw-ring-offset-width: 1px;
 }
 
+.blur {
+  --tw-blur: blur(8px);
+  filter: var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow);
+}
+
 .invert {
   --tw-invert: invert(100%);
   filter: var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow);
@@ -1919,6 +1929,17 @@ input:checked + div + .dot {
   padding-right: 2px;
 }
 
+/* Power-user UI affordances revealed while holding option/alt. JS adds
+ * the .fs-alt-down class to <body> on keydown and removes it on keyup. */
+
+.fs-alt-only {
+  display: none;
+}
+
+body.fs-alt-down .fs-alt-only {
+  display: inline-flex;
+}
+
 /* In the expanded-solution view, an italic span representing the move
  * that a same-face group reduces to. Carries a tooltip via the title
  * attribute set in JS. */
@@ -1974,6 +1995,11 @@ input:checked + div + .dot {
 .hover\:bg-red-700:hover {
   --tw-bg-opacity: 1;
   background-color: rgb(185 28 28 / var(--tw-bg-opacity, 1));
+}
+
+.hover\:text-blue-500:hover {
+  --tw-text-opacity: 1;
+  color: rgb(59 130 246 / var(--tw-text-opacity, 1));
 }
 
 .hover\:text-blue-700:hover {

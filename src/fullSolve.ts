@@ -449,128 +449,125 @@ function backfillF2lSplits() {
   }
 }
 
-// Pair timings recorded by an earlier (buggy) version collapsed pairs
-// 1+2 to the same ms (and 3+4 the same) because down-face wasn't
-// locked until block-1 was done. Detect that signature so we can
-// recompute over the affected records — equal adjacent pair times
-// almost never happen genuinely (would require two pair completions
-// on a single physical move).
-function hasCollapsedPairTimings(arr?: number[]): boolean {
-  if (!arr || arr.length < 2) return false;
-  for (let i = 1; i < arr.length; i++) if (arr[i] === arr[i - 1]) return true;
-  return false;
+// Replay a single Roux/F3uL record's scramble + solution to derive
+// rouxPairTimingsMs and rouxBlock{1,2}FirstPairMs. Returns true if the
+// record was mutated. Records without r.turns can't be back-timed and
+// return false. Caller decides when this runs — it's invoked both by
+// the no-data backfill at init and by the per-row "recompute" button.
+function recomputeRouxPairTimingsFor(r: SolveRecord): boolean {
+  if (!kpuzzle) return false;
+  if (r.process !== 'roux' && r.process !== 'f3ul') return false;
+  if (!r.turns || r.turns.length === 0) return false;
+  let pat = kpuzzle.defaultPattern();
+  for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
+    try { pat = pat.applyMove(m); } catch { return false; }
+  }
+  const tokens = r.solution.split(/\s+/).filter(Boolean);
+  let down: Face | null = null;
+  let side1: Face | null = null;
+  let physIdx = 0;
+  let doneMask = 0;
+  const pairMs: number[] = [];
+  const pairSlots: number[] = [];
+  let block1FirstPairMs: number | null = null;
+  let block2FirstPairMs: number | null = null;
+  let block1DoneSeen = false;
+  let block2DoneSeen = false;
+  for (const t of tokens) {
+    try { pat = pat.applyMove(t); } catch { break; }
+    physIdx += t.endsWith('2') ? 2 : 1;
+    let facelets: string;
+    try { facelets = patternToFacelets(pat); } catch { continue; }
+    const tIdx = Math.min(physIdx, r.turns.length) - 1;
+    const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
+    // Lock the down-face on the FIRST pair completion (any of 6 ×
+    // 4 candidate (d, slot) combos). Without this early lock, pairs
+    // 1 + 2 of the 1st block can't be detected individually and
+    // both end up timestamped at the block-done moment.
+    if (!down) {
+      outer: for (const candidate of FACES) {
+        const slots = F2L_SLOTS[candidate];
+        for (let i = 0; i < slots.length; i++) {
+          let allMatch = true;
+          for (const [sideFace, idx] of slots[i]) {
+            const s = faceStickers(facelets, sideFace);
+            if (s[idx] !== s[4]) { allMatch = false; break; }
+          }
+          if (allMatch) { down = candidate; break outer; }
+        }
+      }
+    }
+    if (!down) continue;
+    // Lock the 1st-block side independently — fires the moment a
+    // full 1x2x3 is formed (same logic as the live wrapper).
+    if (!side1) {
+      for (const s of FACES) {
+        if (s === down || s === OPPOSITE[down]) continue;
+        if (isRouxFirstBlockDoneOn(down, s, facelets)) { side1 = s; break; }
+      }
+    }
+    // Record any newly-completed pairs.
+    const slots = F2L_SLOTS[down];
+    for (let i = 0; i < slots.length; i++) {
+      if (doneMask & (1 << i)) continue;
+      let allMatch = true;
+      for (const [sideFace, idx] of slots[i]) {
+        const s = faceStickers(facelets, sideFace);
+        if (s[idx] !== s[4]) { allMatch = false; break; }
+      }
+      if (allMatch) {
+        doneMask |= (1 << i);
+        pairMs.push(tMs);
+        pairSlots.push(i);
+      }
+    }
+    // Block-done events: capture earliest pair for each block by
+    // side-face membership in the slot's sticker tuple.
+    if (!block1DoneSeen && side1 && isRouxFirstBlockDoneOn(down, side1, facelets)) {
+      block1DoneSeen = true;
+      for (let i = 0; i < pairSlots.length; i++) {
+        const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
+        if (slotFaces.has(side1)) {
+          if (block1FirstPairMs === null || pairMs[i] < block1FirstPairMs) {
+            block1FirstPairMs = pairMs[i];
+          }
+        }
+      }
+    }
+    if (!block2DoneSeen && side1 && isRouxSecondBlockDoneOn(down, side1, facelets)) {
+      block2DoneSeen = true;
+      const side2 = OPPOSITE[side1];
+      for (let i = 0; i < pairSlots.length; i++) {
+        const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
+        if (slotFaces.has(side2)) {
+          if (block2FirstPairMs === null || pairMs[i] < block2FirstPairMs) {
+            block2FirstPairMs = pairMs[i];
+          }
+        }
+      }
+    }
+    if (pairMs.length >= 4 && block1DoneSeen && block2DoneSeen) break;
+  }
+  if (pairMs.length === 0) return false;
+  r.rouxPairTimingsMs = pairMs;
+  if (block1FirstPairMs !== null) r.rouxBlock1FirstPairMs = block1FirstPairMs;
+  if (block2FirstPairMs !== null) r.rouxBlock2FirstPairMs = block2FirstPairMs;
+  return true;
 }
 
-// Roux/F3uL pair-timing backfill — populates rouxPairTimingsMs and
-// rouxBlock{1,2}FirstPairMs by replaying the recorded scramble +
-// solution. Skips records that already have plausible data. Records
-// without r.turns can't be back-timed and are skipped.
+// Roux/F3uL pair-timing backfill — runs once at init (and after JSON
+// import). Only touches records that have NO pair-timings data at
+// all; the manual per-row recompute button handles any case where
+// existing data needs re-derivation. (Equal-adjacent pair timings
+// can be legitimate: a single move that turns a center between two
+// pairs can complete both at once.)
 function backfillRouxPairTimings() {
   if (!kpuzzle) return;
   let updated = 0;
   for (const r of history) {
     if (r.process !== 'roux' && r.process !== 'f3ul') continue;
-    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0
-        && !hasCollapsedPairTimings(r.rouxPairTimingsMs)) continue;
-    if (!r.turns || r.turns.length === 0) continue;
-    let pat = kpuzzle.defaultPattern();
-    let badScramble = false;
-    for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
-      try { pat = pat.applyMove(m); } catch { badScramble = true; break; }
-    }
-    if (badScramble) continue;
-    const tokens = r.solution.split(/\s+/).filter(Boolean);
-    let down: Face | null = null;
-    let side1: Face | null = null;
-    let physIdx = 0;
-    let doneMask = 0;
-    const pairMs: number[] = [];
-    const pairSlots: number[] = [];
-    let block1FirstPairMs: number | null = null;
-    let block2FirstPairMs: number | null = null;
-    let block1DoneSeen = false;
-    let block2DoneSeen = false;
-    for (const t of tokens) {
-      try { pat = pat.applyMove(t); } catch { break; }
-      physIdx += t.endsWith('2') ? 2 : 1;
-      let facelets: string;
-      try { facelets = patternToFacelets(pat); } catch { continue; }
-      const tIdx = Math.min(physIdx, r.turns.length) - 1;
-      const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
-      // Lock the down-face on the FIRST pair completion (any of 6 ×
-      // 4 candidate (d, slot) combos). Without this early lock, pairs
-      // 1 + 2 of the 1st block can't be detected individually and
-      // both end up timestamped at the block-done moment.
-      if (!down) {
-        outer: for (const candidate of FACES) {
-          const slots = F2L_SLOTS[candidate];
-          for (let i = 0; i < slots.length; i++) {
-            let allMatch = true;
-            for (const [sideFace, idx] of slots[i]) {
-              const s = faceStickers(facelets, sideFace);
-              if (s[idx] !== s[4]) { allMatch = false; break; }
-            }
-            if (allMatch) { down = candidate; break outer; }
-          }
-        }
-      }
-      if (!down) continue;
-      // Lock the 1st-block side independently — fires the moment a
-      // full 1x2x3 is formed (same logic as the live wrapper).
-      if (!side1) {
-        for (const s of FACES) {
-          if (s === down || s === OPPOSITE[down]) continue;
-          if (isRouxFirstBlockDoneOn(down, s, facelets)) { side1 = s; break; }
-        }
-      }
-      // Record any newly-completed pairs.
-      const slots = F2L_SLOTS[down];
-      for (let i = 0; i < slots.length; i++) {
-        if (doneMask & (1 << i)) continue;
-        let allMatch = true;
-        for (const [sideFace, idx] of slots[i]) {
-          const s = faceStickers(facelets, sideFace);
-          if (s[idx] !== s[4]) { allMatch = false; break; }
-        }
-        if (allMatch) {
-          doneMask |= (1 << i);
-          pairMs.push(tMs);
-          pairSlots.push(i);
-        }
-      }
-      // Block-done events: capture earliest pair for each block by
-      // side-face membership in the slot's sticker tuple.
-      if (!block1DoneSeen && side1 && isRouxFirstBlockDoneOn(down, side1, facelets)) {
-        block1DoneSeen = true;
-        for (let i = 0; i < pairSlots.length; i++) {
-          const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
-          if (slotFaces.has(side1)) {
-            if (block1FirstPairMs === null || pairMs[i] < block1FirstPairMs) {
-              block1FirstPairMs = pairMs[i];
-            }
-          }
-        }
-      }
-      if (!block2DoneSeen && side1 && isRouxSecondBlockDoneOn(down, side1, facelets)) {
-        block2DoneSeen = true;
-        const side2 = OPPOSITE[side1];
-        for (let i = 0; i < pairSlots.length; i++) {
-          const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
-          if (slotFaces.has(side2)) {
-            if (block2FirstPairMs === null || pairMs[i] < block2FirstPairMs) {
-              block2FirstPairMs = pairMs[i];
-            }
-          }
-        }
-      }
-      if (pairMs.length >= 4 && block1DoneSeen && block2DoneSeen) break;
-    }
-    if (pairMs.length > 0) {
-      r.rouxPairTimingsMs = pairMs;
-      if (block1FirstPairMs !== null) r.rouxBlock1FirstPairMs = block1FirstPairMs;
-      if (block2FirstPairMs !== null) r.rouxBlock2FirstPairMs = block2FirstPairMs;
-      updated++;
-    }
+    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0) continue;
+    if (recomputeRouxPairTimingsFor(r)) updated++;
   }
   if (updated > 0) {
     saveHistory();
@@ -3381,6 +3378,27 @@ function renderSolveList() {
     row.className = 'px-2 py-1 flex items-center gap-2 text-xs sm:text-sm';
     row.dataset.solveIdx = String(realIdx);
 
+    // Power-user-only recompute affordance — revealed by holding
+    // option/alt (CSS rule .fs-alt-only). Replays this solve's
+    // scramble + solution to re-derive rouxPairTimingsMs etc. Only
+    // applicable to Roux/F3uL records with per-turn timing data;
+    // omitted entirely otherwise to keep the row tidy.
+    if ((r.process === 'roux' || r.process === 'f3ul') && r.turns && r.turns.length > 0) {
+      const recompute = document.createElement('button');
+      recompute.className = 'fs-alt-only leading-none text-xs px-0.5 text-gray-400 hover:text-blue-500';
+      recompute.textContent = '🔄';
+      recompute.title = 'Recompute pair timings for this solve (option/alt-held)';
+      recompute.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const changed = recomputeRouxPairTimingsFor(history[realIdx]);
+        if (changed) {
+          saveHistory();
+          renderAllFilterDependent();
+        }
+      });
+      row.appendChild(recompute);
+    }
+
     const num = document.createElement('div');
     num.className = 'w-8 text-right text-gray-400 tabular-nums';
     num.textContent = String(originalIndex);
@@ -4379,6 +4397,21 @@ export function initFullSolve() {
     renderGraph();
     renderStatsLegend();
   }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+  // Global option/alt-key tracking. Adds `fs-alt-down` to <body> while
+  // the key is held; CSS rules in tailwind.css reveal `.fs-alt-only`
+  // affordances (currently: the per-row pair-timing recompute icon).
+  // Clears the class on blur / visibility change so we don't get stuck
+  // showing the affordance after an alt-tab away.
+  const setAltState = (down: boolean) => {
+    document.body.classList.toggle('fs-alt-down', down);
+  };
+  document.addEventListener('keydown', (e) => { if (e.altKey) setAltState(true); });
+  document.addEventListener('keyup', (e) => { if (!e.altKey) setAltState(false); });
+  window.addEventListener('blur', () => setAltState(false));
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) setAltState(false);
+  });
 }
 
 export function fsOnPhysicalMove(move: string) {
