@@ -715,10 +715,12 @@ const PHASE_COLORS = [
   // read as related-but-distinct.
   'rgba(16, 185, 129, 0.45)',  // 7  green-light — F2B  (2nd F2L sub-band)
   // Block-stage sub-shade colors for the Roux/F3uL granular display.
-  // Light purple sits below the existing purple (slot 5) for the
-  // first-block lead-in; light green ditto for the second-block lead-in.
-  'rgba(139, 92, 246, 0.30)',  // 8  light purple — block-stage "1st pair" sub-shade
-  'rgba(16, 185, 129, 0.30)',  // 9  light green  — block-stage "1st pair of 2nd block" sub-shade
+  // Light pink sits below the existing pink (slot 0 = CFOP cross
+  // color) for the first-block lead-in, so Roux/F3uL's 1st block
+  // visually parallels CFOP's cross. Light green ditto for the
+  // second-block lead-in (paralleling F2L green).
+  'rgba(236, 72, 153, 0.30)',  // 8  light pink  — block-stage "1st pair" sub-shade
+  'rgba(16, 185, 129, 0.30)',  // 9  light green — block-stage "1st pair of 2nd block" sub-shade
 ];
 
 // The canonical RECORDING phase sequence — what phase detection watches
@@ -3097,16 +3099,16 @@ const PHASE_COLOR_BY_KEY: Record<string, string> = {
   fml:   PHASE_COLORS[1],   // same green as F2L — F3uL's FML lands in F2L-done state
   // Block-stage shades. Scheme 1 = b1_pre → b1_done → b2_pre → b2_done.
   // Scheme 2 = rp1 → rp2 → rp3 → rp4. Same colors slot-for-slot:
-  // light purple → dark purple → light green → medium green. F3uL
-  // additionally renders FML (dark green) on top; Roux records end at
-  // medium green per the user's "darker for completion of 2nd block,
-  // darkest for FML" definition.
-  b1_pre:   PHASE_COLORS[8],   // light purple
-  b1_done:  PHASE_COLORS[5],   // dark purple (same shade EPLL uses; intentional reuse)
+  // light pink → cross-pink → light green → medium green. 1st-block
+  // shades are pink so Roux/F3uL's first stage visually parallels
+  // CFOP's cross. F3uL adds FML (dark green) on top; Roux records end
+  // at medium green per "darker for 2nd block done, darkest for FML".
+  b1_pre:   PHASE_COLORS[8],   // light pink
+  b1_done:  PHASE_COLORS[0],   // cross pink (intentional reuse of CFOP cross color)
   b2_pre:   PHASE_COLORS[9],   // light green
   b2_done:  PHASE_COLORS[7],   // medium green (= existing F2B color)
   rp1:      PHASE_COLORS[8],
-  rp2:      PHASE_COLORS[5],
+  rp2:      PHASE_COLORS[0],
   rp3:      PHASE_COLORS[9],
   rp4:      PHASE_COLORS[7],
   opll:  PHASE_COLORS[4],
