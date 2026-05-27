@@ -9,6 +9,10 @@ export const PHASE_KEY_LABELS: Record<string, string> = {
   f1b: '1st Block', f2b: '2nd Block', fml: 'FML',
   cmll: 'CMLL', opll: 'OPLL',
   lse: 'LSE', lseo: 'LSEO', lre: 'LRE', opme: 'OPME',
+  // Block-stage sub-shades
+  b1_pre: '1st block · 1st pair', b1_done: '1st block',
+  b2_pre: '2nd block · 1st pair', b2_done: '2nd block',
+  rp1: '1st pair', rp2: '2nd pair', rp3: '3rd pair', rp4: '4th pair',
 };
 
 // Look up a phase's milliseconds from a stored record, given the *display*
@@ -69,6 +73,23 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
     case 'lre':  return (p.lre ?? 0);
     // OPME (3rd LSE sub-phase) absorbs LSE aggregate when displayed split.
     case 'opme': return (p.opme ?? p.lse ?? 0);
+    // Roux/F3uL block-stage sub-shade durations. Each is derived from
+    // r.rouxPairTimingsMs (chronological pair completions) and the
+    // block-completion anchors r.rouxBlock{1,2}FirstPairMs plus the
+    // existing cumulative phase durations p.f1b / p.f2b. All Math.max
+    // guards because of rounding.
+    //
+    // Scheme 1: block-aware.
+    case 'b1_pre':  return r.rouxBlock1FirstPairMs ?? 0;
+    case 'b1_done': return Math.max(0, (p.f1b ?? 0) - (r.rouxBlock1FirstPairMs ?? 0));
+    case 'b2_pre':  return Math.max(0, (r.rouxBlock2FirstPairMs ?? 0) - (p.f1b ?? 0));
+    case 'b2_done': return Math.max(0, ((p.f1b ?? 0) + (p.f2b ?? 0)) - (r.rouxBlock2FirstPairMs ?? 0));
+    // Scheme 2: chronological pair count. Anchor for rp4 is the
+    // sum of f1b + f2b (= 2nd block done = 4 pairs done by definition).
+    case 'rp1': return r.rouxPairTimingsMs?.[0] ?? 0;
+    case 'rp2': return Math.max(0, (r.rouxPairTimingsMs?.[1] ?? 0) - (r.rouxPairTimingsMs?.[0] ?? 0));
+    case 'rp3': return Math.max(0, (r.rouxPairTimingsMs?.[2] ?? 0) - (r.rouxPairTimingsMs?.[1] ?? 0));
+    case 'rp4': return Math.max(0, ((p.f1b ?? 0) + (p.f2b ?? 0)) - (r.rouxPairTimingsMs?.[2] ?? 0));
     default:     return p[displayKey] ?? 0;
   }
 }

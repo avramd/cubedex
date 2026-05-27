@@ -6,7 +6,7 @@ import { patternToFacelets } from './utils';
 import { type Face, FACES, OPPOSITE, faceStickers, isSolved } from './cube/facelets';
 import {
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
-  f2lSlotsDoneOn,
+  f2lSlotsDoneOn, F2L_SLOTS,
   isRouxFirstBlockDoneOn, isRouxSecondBlockDoneOn,
   areTopCornersOrientedOn, isLSEOrientedOn, isLREDoneOn,
 } from './cube/predicates';
@@ -64,6 +64,10 @@ interface FullSolvePrefs {
   // Roux-only: when true, split LSE into LSEO → LRE → OPME (3-look LSE).
   // Ignored for non-Roux processes.
   threeLookLse: boolean;
+  // Roux/F3uL block-stage shade scheme (display only):
+  //   1 = block-aware (1st-pair-of-block → block-done shades)
+  //   2 = pair-count   (chronological pair-count shades)
+  rouxColorScheme: 1 | 2;
   // Tags pending to be applied to the NEXT completed solve. Sticky:
   // they remain after each solve until the user removes them via the
   // pre-solve tag editor.
@@ -103,6 +107,7 @@ const defaultPrefs: FullSolvePrefs = {
   f2lSplits: false,
   twoLookCmll: false,
   threeLookLse: false,
+  rouxColorScheme: 1,
   pendingSolveTags: [],
   graphTagFilter: { include: [], exclude: [] },
   recentTagSets: [],
@@ -444,6 +449,107 @@ function backfillF2lSplits() {
   }
 }
 
+// Roux/F3uL pair-timing backfill — populates rouxPairTimingsMs and
+// rouxBlock{1,2}FirstPairMs by replaying the recorded scramble +
+// solution. Records that already have these fields are left alone.
+// Records without r.turns can't be back-timed and are skipped.
+function backfillRouxPairTimings() {
+  if (!kpuzzle) return;
+  let updated = 0;
+  for (const r of history) {
+    if (r.process !== 'roux' && r.process !== 'f3ul') continue;
+    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0) continue;
+    if (!r.turns || r.turns.length === 0) continue;
+    let pat = kpuzzle.defaultPattern();
+    let badScramble = false;
+    for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
+      try { pat = pat.applyMove(m); } catch { badScramble = true; break; }
+    }
+    if (badScramble) continue;
+    const tokens = r.solution.split(/\s+/).filter(Boolean);
+    let down: Face | null = null;
+    let side1: Face | null = null;
+    let physIdx = 0;
+    let doneMask = 0;
+    const pairMs: number[] = [];
+    const pairSlots: number[] = [];
+    let block1FirstPairMs: number | null = null;
+    let block2FirstPairMs: number | null = null;
+    let block1DoneSeen = false;
+    let block2DoneSeen = false;
+    for (const t of tokens) {
+      try { pat = pat.applyMove(t); } catch { break; }
+      physIdx += t.endsWith('2') ? 2 : 1;
+      let facelets: string;
+      try { facelets = patternToFacelets(pat); } catch { continue; }
+      const tIdx = Math.min(physIdx, r.turns.length) - 1;
+      const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
+      // Detect/lock down-face + 1st-block side.
+      if (!down) {
+        for (const d of FACES) {
+          for (const s of FACES) {
+            if (s === d || s === OPPOSITE[d]) continue;
+            if (isRouxFirstBlockDoneOn(d, s, facelets)) { down = d; side1 = s; break; }
+          }
+          if (down) break;
+        }
+      }
+      if (!down) continue;
+      // Record any newly-completed pairs.
+      const slots = F2L_SLOTS[down];
+      for (let i = 0; i < slots.length; i++) {
+        if (doneMask & (1 << i)) continue;
+        let allMatch = true;
+        for (const [sideFace, idx] of slots[i]) {
+          const s = faceStickers(facelets, sideFace);
+          if (s[idx] !== s[4]) { allMatch = false; break; }
+        }
+        if (allMatch) {
+          doneMask |= (1 << i);
+          pairMs.push(tMs);
+          pairSlots.push(i);
+        }
+      }
+      // Block-done events: capture earliest pair for each block by
+      // side-face membership in the slot's sticker tuple.
+      if (!block1DoneSeen && side1 && isRouxFirstBlockDoneOn(down, side1, facelets)) {
+        block1DoneSeen = true;
+        for (let i = 0; i < pairSlots.length; i++) {
+          const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
+          if (slotFaces.has(side1)) {
+            if (block1FirstPairMs === null || pairMs[i] < block1FirstPairMs) {
+              block1FirstPairMs = pairMs[i];
+            }
+          }
+        }
+      }
+      if (!block2DoneSeen && side1 && isRouxSecondBlockDoneOn(down, side1, facelets)) {
+        block2DoneSeen = true;
+        const side2 = OPPOSITE[side1];
+        for (let i = 0; i < pairSlots.length; i++) {
+          const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
+          if (slotFaces.has(side2)) {
+            if (block2FirstPairMs === null || pairMs[i] < block2FirstPairMs) {
+              block2FirstPairMs = pairMs[i];
+            }
+          }
+        }
+      }
+      if (pairMs.length >= 4 && block1DoneSeen && block2DoneSeen) break;
+    }
+    if (pairMs.length > 0) {
+      r.rouxPairTimingsMs = pairMs;
+      if (block1FirstPairMs !== null) r.rouxBlock1FirstPairMs = block1FirstPairMs;
+      if (block2FirstPairMs !== null) r.rouxBlock2FirstPairMs = block2FirstPairMs;
+      updated++;
+    }
+  }
+  if (updated > 0) {
+    saveHistory();
+    if (prefs.enabled) renderGraph();
+  }
+}
+
 function importHistoryFromText(text: string) {
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { alert('Import failed: invalid JSON.'); return; }
@@ -453,6 +559,7 @@ function importHistoryFromText(text: string) {
   // Imported records may have `turns` but no `f2lSplits`; replay them so
   // the F2L-slots toggle has data to show.
   backfillF2lSplits();
+  backfillRouxPairTimings();
   renderGraph();
   renderStatsBoxes();
   renderStatsLegend();
@@ -607,6 +714,11 @@ const PHASE_COLORS = [
   // family as F2L/FML, just less saturated so the two block phases
   // read as related-but-distinct.
   'rgba(16, 185, 129, 0.45)',  // 7  green-light — F2B  (2nd F2L sub-band)
+  // Block-stage sub-shade colors for the Roux/F3uL granular display.
+  // Light purple sits below the existing purple (slot 5) for the
+  // first-block lead-in; light green ditto for the second-block lead-in.
+  'rgba(139, 92, 246, 0.30)',  // 8  light purple — block-stage "1st pair" sub-shade
+  'rgba(16, 185, 129, 0.30)',  // 9  light green  — block-stage "1st pair of 2nd block" sub-shade
 ];
 
 // The canonical RECORDING phase sequence — what phase detection watches
@@ -666,6 +778,11 @@ function currentPhaseSequence(): PhaseDef[] {
 // (same), then the Beginner aggregate at the very top.
 const CANONICAL_KEY_ORDER: readonly string[] = [
   'setup', 'cross', 'f1b',
+  // Roux/F3uL block-stage sub-shades (Scheme 1 = block-aware; Scheme 2
+  // = pair-count). At most one of these key families appears for a
+  // given record + scheme; the other contributes 0 across the slice.
+  'b1_pre', 'b1_done', 'b2_pre', 'b2_done',
+  'rp1', 'rp2', 'rp3', 'rp4',
   'f2l', 'f2b', 'fml',
   // OLL/CMLL phase
   'eoll',
@@ -691,15 +808,31 @@ const CANONICAL_KEY_ORDER: readonly string[] = [
 // records honor twoLookOll/twoLookPll.
 function displayPhaseSequenceFor(r: SolveRecord): string[] {
   if (r.process === 'beginner') return ['setup', 'll'];
+  // Roux/F3uL block-stage key choice depends on (a) whether the record
+  // has the granular per-pair data and (b) the active color scheme.
+  // Records without granular data fall back to the original 2-band
+  // ['f1b', 'f2b'] display regardless of scheme.
+  const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+  const hasScheme1Anchors = typeof r.rouxBlock1FirstPairMs === 'number'
+                          && typeof r.rouxBlock2FirstPairMs === 'number';
+  const blockKeys = (() => {
+    if (prefs.rouxColorScheme === 1 && hasScheme1Anchors) {
+      return ['b1_pre', 'b1_done', 'b2_pre', 'b2_done'];
+    }
+    if (prefs.rouxColorScheme === 2 && hasGranular) {
+      return ['rp1', 'rp2', 'rp3', 'rp4'];
+    }
+    return ['f1b', 'f2b'];
+  })();
   if (r.process === 'roux') {
     const oll = prefs.twoLookCmll ? ['ocll', 'opll'] : ['cmll'];
     const lse = prefs.threeLookLse ? ['lseo', 'lre', 'opme'] : ['lse'];
-    return ['f1b', 'f2b', ...oll, ...lse];
+    return [...blockKeys, ...oll, ...lse];
   }
   if (r.process === 'f3ul') {
     const oll = prefs.twoLookOll ? ['eoll', 'ocll'] : ['oll'];
     const pll = prefs.twoLookPll ? ['cpll', 'epll'] : ['pll'];
-    return ['f1b', 'f2b', 'fml', ...oll, ...pll];
+    return [...blockKeys, 'fml', ...oll, ...pll];
   }
   // cfop
   const oll = prefs.twoLookOll ? ['eoll', 'ocll'] : ['oll'];
@@ -752,6 +885,7 @@ const fsImportHistoryInputEl = () => $$<HTMLInputElement>('fs-import-history-inp
 const fsPendingTagsBtnEl = () => $$<HTMLButtonElement>('fs-pending-tags-btn');
 const fsPendingTagsDisplayEl = () => $$('fs-pending-tags-display');
 const fsTagsFilterMenuEl = () => $$<HTMLSelectElement>('fs-tags-filter-menu');
+const fsRouxSchemeEl = () => $$<HTMLSelectElement>('fs-roux-scheme');
 const fsTagEditorDialogEl = () => $$<HTMLDialogElement>('fs-tag-editor-dialog');
 const fsTagEditorTitleEl = () => $$('fs-tag-editor-title');
 const fsTagEditorSelectedEl = () => $$('fs-tag-editor-selected');
@@ -800,6 +934,7 @@ cube3x3x3.kpuzzle().then(kp => {
   // the kpuzzle, so the F2L-slots toggle visualises every applicable
   // historical solve uniformly.
   backfillF2lSplits();
+  backfillRouxPairTimings();
 });
 
 let mode: Mode = 'idle';
@@ -873,6 +1008,16 @@ let solveTurns: number[] = [];
 // bounded to 4 entries (matching the 4 F2L slots).
 let solveF2lSplits: number[] = [];
 let f2lSlotsEverDone = 0;
+// Roux/F3uL per-pair tracking (parallel arrays, chronological).
+// solveRouxPairTimingsMs[i] = absolute ms-from-solveStart at i-th pair
+// completion. solveRouxPairSlotIdxs[i] = which F2L_SLOTS[D] slot
+// completed (so we can attribute pairs to block 1 vs block 2 when
+// each block-done predicate fires).
+let solveRouxPairTimingsMs: number[] = [];
+let solveRouxPairSlotIdxs: number[] = [];
+let solveRouxPairSlotsDoneMask = 0;        // bitmask of slot indices already recorded
+let solveRouxBlock1FirstPairMs: number | null = null;
+let solveRouxBlock2FirstPairMs: number | null = null;
 
 // Graph
 let graphChart: Chart | null = null;
@@ -1447,6 +1592,11 @@ function resetSolveState() {
   solveTurns = [];
   solveF2lSplits = [];
   f2lSlotsEverDone = 0;
+  solveRouxPairTimingsMs = [];
+  solveRouxPairSlotIdxs = [];
+  solveRouxPairSlotsDoneMask = 0;
+  solveRouxBlock1FirstPairMs = null;
+  solveRouxBlock2FirstPairMs = null;
   halfwayActive = false;
   detectedCrossFace = null;
   detectedDownFace = null;
@@ -1493,6 +1643,11 @@ function abortSolve() {
   solveTurns = [];
   solveF2lSplits = [];
   f2lSlotsEverDone = 0;
+  solveRouxPairTimingsMs = [];
+  solveRouxPairSlotIdxs = [];
+  solveRouxPairSlotsDoneMask = 0;
+  solveRouxBlock1FirstPairMs = null;
+  solveRouxBlock2FirstPairMs = null;
   detectedCrossFace = null;
   detectedDownFace = null;
   detectedRouxSide1 = null;
@@ -1668,9 +1823,78 @@ function sampleF2lSlotProgression(facelets: string, now: number) {
   }
 }
 
+// Roux/F3uL analog. Tracks per-PAIR completion (not just count) so we
+// can attribute each pair to block 1 vs block 2 once the corresponding
+// block-done predicate fires. Uses F2L_SLOTS[D] directly to identify
+// which specific slot just completed (the existing f2lSlotsDoneOn
+// returns only the count). detectedDownFace is locked by isFirstBlockDone.
+function sampleRouxPairProgression(facelets: string, now: number) {
+  if (prefs.process !== 'roux' && prefs.process !== 'f3ul') return;
+  if (!detectedDownFace) return;
+  if (solveRouxPairTimingsMs.length >= 4) return;
+  const slots = F2L_SLOTS[detectedDownFace];
+  const msFromStart = now - solveStartMs;
+  for (let i = 0; i < slots.length; i++) {
+    if (solveRouxPairSlotsDoneMask & (1 << i)) continue;
+    let allMatch = true;
+    for (const [sideFace, idx] of slots[i]) {
+      const s = faceStickers(facelets, sideFace);
+      if (s[idx] !== s[4]) { allMatch = false; break; }
+    }
+    if (allMatch) {
+      solveRouxPairSlotsDoneMask |= (1 << i);
+      solveRouxPairTimingsMs.push(msFromStart);
+      solveRouxPairSlotIdxs.push(i);
+    }
+  }
+}
+
+// When isFirstBlockDone fires, two of the four pair slots will sit on
+// detectedRouxSide1 (= the 1st-block side). Capture the earlier of
+// their two recorded timings as the "1st pair of 1st block" anchor.
+function captureRouxBlockFirstPair(whichBlock: 1 | 2) {
+  if (!detectedDownFace || !detectedRouxSide1) return;
+  // Determine the side face (the actual Face) for this block.
+  const blockSide: Face = whichBlock === 1
+    ? detectedRouxSide1
+    : OPPOSITE[detectedRouxSide1];
+  // Map slot index → its side face. The F2L_SLOTS[D] rows always
+  // include 2 stickers from each adjacent side face for each slot;
+  // the slot's "side face" is whichever of those isn't D's opposite
+  // and matches blockSide. Look at slot stickers and pick.
+  const earliestForBlock = (() => {
+    let earliest: number | null = null;
+    for (let i = 0; i < solveRouxPairSlotIdxs.length; i++) {
+      const slotIdx = solveRouxPairSlotIdxs[i];
+      // A slot belongs to `blockSide` if `blockSide` appears in its
+      // sticker tuple. Equivalent to checking whether blockSide is
+      // one of the two perpendicular faces this slot touches.
+      const slotFaces = new Set(F2L_SLOTS[detectedDownFace!][slotIdx].map(([f]) => f));
+      if (slotFaces.has(blockSide)) {
+        if (earliest === null || solveRouxPairTimingsMs[i] < earliest) {
+          earliest = solveRouxPairTimingsMs[i];
+        }
+      }
+    }
+    return earliest;
+  })();
+  if (earliestForBlock === null) return;
+  if (whichBlock === 1 && solveRouxBlock1FirstPairMs === null) {
+    solveRouxBlock1FirstPairMs = earliestForBlock;
+  }
+  if (whichBlock === 2 && solveRouxBlock2FirstPairMs === null) {
+    solveRouxBlock2FirstPairMs = earliestForBlock;
+  }
+}
+
 function evaluatePhaseTransitions(facelets: string) {
   if (mode !== 'solving') return;
   const now = Date.now() - pausedAccumMs;
+  // Always sample pair progression FIRST so the block-first-pair
+  // anchors captured below can see the pair-completion timings (a
+  // block-done predicate often fires on the same move that completes
+  // its 2nd pair, which we need recorded already).
+  sampleRouxPairProgression(facelets, now);
   const fired: string[] = [];
   for (let i = 0; i < phaseSeq.length; i++) {
     if (phaseTimestamps[i] !== null) continue;
@@ -1680,6 +1904,11 @@ function evaluatePhaseTransitions(facelets: string) {
       phaseReachedAtMoveIdx[i] = solveMoves.length;
       fired.push(phaseSeq[i].label);
       renderStatus(`Phase reached: ${phaseSeq[i].label}`);
+      // Roux/F3uL: when a block-done predicate fires, attribute its
+      // 2 constituent pairs and remember the earlier of them as the
+      // block's "first pair" anchor (drives scheme-1 shades).
+      if (phaseSeq[i].key === 'f1b') captureRouxBlockFirstPair(1);
+      if (phaseSeq[i].key === 'f2b') captureRouxBlockFirstPair(2);
       const nextPhase = phaseSeq[i + 1];
       if (!nextPhase) {
         // Sample slot progression once more before finishing, so a same-
@@ -1742,6 +1971,18 @@ function finishSolve() {
     // CFOP/F3uL/Beginner record shape unchanged.
     ...(prefs.process === 'roux' ? { twoLookCmll: prefs.twoLookCmll } : {}),
     ...(prefs.process === 'roux' ? { threeLookLse: prefs.threeLookLse } : {}),
+    // Roux/F3uL granular pair timings (drives the block-stage shade
+    // schemes). Only attached when we actually captured at least one
+    // pair completion.
+    ...((prefs.process === 'roux' || prefs.process === 'f3ul') && solveRouxPairTimingsMs.length > 0
+        ? { rouxPairTimingsMs: solveRouxPairTimingsMs.slice() }
+        : {}),
+    ...(solveRouxBlock1FirstPairMs !== null
+        ? { rouxBlock1FirstPairMs: solveRouxBlock1FirstPairMs }
+        : {}),
+    ...(solveRouxBlock2FirstPairMs !== null
+        ? { rouxBlock2FirstPairMs: solveRouxBlock2FirstPairMs }
+        : {}),
     turns: solveTurns.slice(),
     // Only attach when we actually recorded splits — keeps records small
     // for runs that didn't hit the F2L phase (e.g. beginner mode).
@@ -2854,6 +3095,20 @@ const PHASE_COLOR_BY_KEY: Record<string, string> = {
   f1b:   PHASE_COLORS[0],
   f2b:   PHASE_COLORS[7],   // green-light — 2nd F2L sub-band shade
   fml:   PHASE_COLORS[1],   // same green as F2L — F3uL's FML lands in F2L-done state
+  // Block-stage shades. Scheme 1 = b1_pre → b1_done → b2_pre → b2_done.
+  // Scheme 2 = rp1 → rp2 → rp3 → rp4. Same colors slot-for-slot:
+  // light purple → dark purple → light green → medium green. F3uL
+  // additionally renders FML (dark green) on top; Roux records end at
+  // medium green per the user's "darker for completion of 2nd block,
+  // darkest for FML" definition.
+  b1_pre:   PHASE_COLORS[8],   // light purple
+  b1_done:  PHASE_COLORS[5],   // dark purple (same shade EPLL uses; intentional reuse)
+  b2_pre:   PHASE_COLORS[9],   // light green
+  b2_done:  PHASE_COLORS[7],   // medium green (= existing F2B color)
+  rp1:      PHASE_COLORS[8],
+  rp2:      PHASE_COLORS[5],
+  rp3:      PHASE_COLORS[9],
+  rp4:      PHASE_COLORS[7],
   opll:  PHASE_COLORS[4],
   cmll:  PHASE_COLORS[4],   // aggregate uses OPLL's color (top of stack)
   lseo:  PHASE_COLORS[2],
@@ -3398,6 +3653,16 @@ function wireEvents() {
     void onTagsFilterMenuChange(sel.value);
   });
 
+  fsRouxSchemeEl()?.addEventListener('change', () => {
+    const sel = fsRouxSchemeEl();
+    if (!sel) return;
+    prefs.rouxColorScheme = (sel.value === '2' ? 2 : 1);
+    savePrefs();
+    renderGraph();
+    renderStatsBoxes();
+    renderStatsLegend();
+  });
+
   wireTagEditorDialog();
   wireAdvancedFilterDialog();
 
@@ -3481,6 +3746,7 @@ function applyPrefsToUI() {
   const pl = fsTwoLookPllEl(); if (pl) pl.checked = prefs.twoLookPll;
   const cm = fsTwoLookCmllEl(); if (cm) cm.checked = prefs.twoLookCmll;
   const ls = fsThreeLookLseEl(); if (ls) ls.checked = prefs.threeLookLse;
+  const rs = fsRouxSchemeEl(); if (rs) rs.value = String(prefs.rouxColorScheme);
   // Slider range is fixed: 20 (min) to 500 (HISTORY_CAP). When history is
   // shorter than the chosen range, renderGraph() clamps to history.length.
   if (prefs.graphRange < 10 || prefs.graphRange > 500) {

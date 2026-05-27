@@ -141,6 +141,9 @@ describe('mergeImportedHistory — full-record round-trip contract', () => {
     tags: ['speed', 'two look pll', 'warmup'],
     twoLookCmll: true,
     threeLookLse: true,
+    rouxPairTimingsMs: [2200, 3500, 5500, 7000],
+    rouxBlock1FirstPairMs: 2200,
+    rouxBlock2FirstPairMs: 5500,
   };
 
   it('export → import preserves every documented SolveRecord field byte-for-byte', () => {

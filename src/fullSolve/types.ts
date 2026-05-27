@@ -80,4 +80,16 @@ export interface SolveRecord {
   // Roux-specific: split LSE into LSEO → LRE → OPME (3-look LSE).
   // Only meaningful when process is 'roux'.
   threeLookLse?: boolean;
+  // Roux/F3uL per-pair timing: ms-from-solve-start at each F2L slot
+  // (= Roux pair) completion, in chronological order. Up to 4
+  // entries. Drives the granular block-stage shade rendering; older
+  // records lacking this fall back to the 2-band (f1b / f2b) display.
+  rouxPairTimingsMs?: number[];
+  // Absolute ms-from-solve-start at the FIRST pair of the
+  // first-completed and second-completed blocks. Drives the
+  // "block-aware" Roux color scheme. The corresponding
+  // block-COMPLETE timestamps are recoverable from
+  // r.phases.f1b / r.phases.f2b (cumulative).
+  rouxBlock1FirstPairMs?: number;
+  rouxBlock2FirstPairMs?: number;
 }

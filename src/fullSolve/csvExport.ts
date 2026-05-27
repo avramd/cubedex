@@ -23,15 +23,28 @@ export function phaseAtMs(r: SolveRecord, t_ms: number): string {
     return 'solved';
   }
   if (r.process === 'roux') {
-    // Order: f1b → f2b → CMLL (split: ocll+opll or aggregate: cmll) →
-    // LSE (split: lseo+lre+opme or aggregate: lse).
+    // Order: F1B / F2B (split into rp1..rp4 pair-count labels when the
+    // record carries rouxPairTimingsMs) → CMLL → LSE.
     let cursor = 0;
-    const f1b = p.f1b ?? 0;
-    if (t_ms < cursor + f1b) return 'f1b';
-    cursor += f1b;
-    const f2b = p.f2b ?? 0;
-    if (t_ms < cursor + f2b) return 'f2b';
-    cursor += f2b;
+    const pairTimings = r.rouxPairTimingsMs;
+    if (pairTimings && pairTimings.length >= 4) {
+      // Walk the 4 pair boundaries. Each rpN label runs from the
+      // previous pair-completion ms to the next one. rp4 wraps up at
+      // f1b+f2b (= "2nd block done"), matching the block-stage end.
+      const bounds = [pairTimings[0], pairTimings[1], pairTimings[2], (p.f1b ?? 0) + (p.f2b ?? 0)];
+      const labels = ['rp1', 'rp2', 'rp3', 'rp4'];
+      for (let i = 0; i < 4; i++) {
+        if (t_ms < bounds[i]) return labels[i];
+      }
+      cursor = bounds[3];
+    } else {
+      const f1b = p.f1b ?? 0;
+      if (t_ms < cursor + f1b) return 'f1b';
+      cursor += f1b;
+      const f2b = p.f2b ?? 0;
+      if (t_ms < cursor + f2b) return 'f2b';
+      cursor += f2b;
+    }
     const ocll = p.ocll ?? 0;
     const opll = p.opll ?? 0;
     const cmllSplit = ocll > 0 || opll > 0;
@@ -64,14 +77,25 @@ export function phaseAtMs(r: SolveRecord, t_ms: number): string {
     return 'solved';
   }
   if (r.process === 'f3ul') {
-    // Order: f1b → f2b → fml → OLL (split or aggregate) → PLL (split or aggregate).
+    // Order: F1B/F2B (split into rp1..rp4 when granular data present) →
+    // FML → OLL → PLL.
     let cursor = 0;
-    const f1b = p.f1b ?? 0;
-    if (t_ms < cursor + f1b) return 'f1b';
-    cursor += f1b;
-    const f2b = p.f2b ?? 0;
-    if (t_ms < cursor + f2b) return 'f2b';
-    cursor += f2b;
+    const pairTimings = r.rouxPairTimingsMs;
+    if (pairTimings && pairTimings.length >= 4) {
+      const bounds = [pairTimings[0], pairTimings[1], pairTimings[2], (p.f1b ?? 0) + (p.f2b ?? 0)];
+      const labels = ['rp1', 'rp2', 'rp3', 'rp4'];
+      for (let i = 0; i < 4; i++) {
+        if (t_ms < bounds[i]) return labels[i];
+      }
+      cursor = bounds[3];
+    } else {
+      const f1b = p.f1b ?? 0;
+      if (t_ms < cursor + f1b) return 'f1b';
+      cursor += f1b;
+      const f2b = p.f2b ?? 0;
+      if (t_ms < cursor + f2b) return 'f2b';
+      cursor += f2b;
+    }
     const fml = p.fml ?? 0;
     if (t_ms < cursor + fml) return 'fml';
     cursor += fml;
