@@ -12,9 +12,9 @@ export const PHASE_KEY_LABELS: Record<string, string> = {
   // Block-stage sub-shades — block-aware (scheme 1) labels mix pair
   // counts with block-completion milestones; pair-count (scheme 2)
   // labels are uniformly chronological.
-  b1_pre: '1st pr', b1_done: '1st blk',
-  b2_pre: '3rd pr', b2_done: '2nd blk',
-  rp1: '1st pr', rp2: '2nd pr', rp3: '3rd pr', rp4: '4th pr',
+  b1_pre: '1pr', b1_done: '1blk',
+  b2_pre: '3pr', b2_done: '2blk',
+  rp1: '1pr', rp2: '2pr', rp3: '3pr', rp4: '4pr',
 };
 
 // Look up a phase's milliseconds from a stored record, given the *display*
