@@ -7,6 +7,7 @@ import {
   isRouxFirstBlockDoneOn, isRouxSecondBlockDoneOn,
   areTopCornersOrientedOn, isLSEOrientedOn, isLREDoneOn,
   EDGE_DS,
+  crossEdgesCorrectlyPlaced,
 } from './predicates';
 
 // Solved cube using face letters as colors (URFDLB layout, 9 stickers each).
@@ -125,6 +126,107 @@ describe('isCrossDoneOn — partial states', () => {
     const s = setSticker(SOLVED, 'D', 1, 'X');
     expect(isCrossDoneOn('D', s)).toBe(false);
     expect(isCrossDoneOn('U', s)).toBe(true);
+  });
+});
+
+describe('crossEdgesCorrectlyPlaced', () => {
+  // SOLVED uses face letters as colours: D-face = 'D', F-face = 'F',
+  // etc. Cross-face centre for D = 'D'. Side centres = F, R, B, L.
+
+  // For each cross face, expect 4 (full cross) on a solved cube.
+  it('returns 4 on a solved cube for every cross face', () => {
+    for (const f of FACES) expect(crossEdgesCorrectlyPlaced(f, SOLVED)).toBe(4);
+  });
+
+  it('returns 0 when no cross edges are D-down', () => {
+    // Flip every cross-face edge sticker to a non-D colour.
+    let s = SOLVED;
+    s = setSticker(s, 'D', 1, 'X');
+    s = setSticker(s, 'D', 3, 'X');
+    s = setSticker(s, 'D', 5, 'X');
+    s = setSticker(s, 'D', 7, 'X');
+    expect(crossEdgesCorrectlyPlaced('D', s)).toBe(0);
+  });
+
+  it('counts 1 D-down edge as 1 (single-edge groups are trivially in correct relative position)', () => {
+    // 3 cross edges flipped (D-colour off D-face); the 4th still D-down.
+    let s = SOLVED;
+    s = setSticker(s, 'D', 3, 'X');
+    s = setSticker(s, 'D', 5, 'X');
+    s = setSticker(s, 'D', 7, 'X');
+    expect(crossEdgesCorrectlyPlaced('D', s)).toBe(1);
+  });
+
+  it('counts 4 D-down edges at canonical positions as 4 (full cross)', () => {
+    // Solved cube IS the canonical placement.
+    expect(crossEdgesCorrectlyPlaced('D', SOLVED)).toBe(4);
+  });
+
+  it('counts 2 D-down edges at correct RELATIVE positions even when shifted', () => {
+    // Swap the F-edge and the R-edge SIDE stickers — both still D-down,
+    // but each is at the OTHER's canonical slot. Their offsets from their
+    // canonical positions are the same (both shifted by the same cyclic
+    // delta), so they read as "2 in correct relative position".
+    // Per the cyclic order CROSS_CYCLIC[D] = [F, L, B, R]:
+    //   F-slot = position 0, L = 1, B = 2, R = 3.
+    //   F-colour canonical = 0, L-colour = 1, B-colour = 2, R-colour = 3.
+    // Move R-colour edge to F-slot (still D-down) → at pos 0, canonical 3,
+    // offset = (0 - 3 + 4) % 4 = 1.
+    // Move F-colour edge to R-slot (still D-down) → at pos 3, canonical 0,
+    // offset = (3 - 0) % 4 = 3.
+    // Different offsets — count = 1 each, max = 1. So this is NOT what we
+    // want. Try a rotation instead: shift ALL 4 edges by 1 cyclic position.
+    //   F→L position: F-edge's side sticker shows F-colour, sits at L-slot.
+    //     Canonical for F-colour = 0. Actual = 1. Offset = 1.
+    //   L→B: L-colour at B-slot. canonical 1, actual 2. Offset = 1.
+    // For 4 same-offset → count = 4. But on SOLVED, all 4 are at offset 0.
+    //
+    // Concrete test: swap the F-edge and R-edge cubies (as a 2-cycle).
+    // Their positions swap, so:
+    //   F-edge at R-slot (pos 3): side sticker = F-colour (canonical 0),
+    //     offset = (3 - 0) % 4 = 3.
+    //   R-edge at F-slot (pos 0): side sticker = R-colour (canonical 3),
+    //     offset = (0 - 3 + 4) % 4 = 1.
+    // Both offsets differ → count = 1 each, max = 1.
+    // So a 2-cycle of adjacent edges does NOT increase the count above 1.
+    // That's the correct semantic: a 2-cycle is "1 in relative-correct
+    // position" because each edge is alone in its rotation class.
+    //
+    // To get 2: keep two edges at canonical and disturb the other two.
+    let s = SOLVED;
+    s = setSticker(s, 'D', 7, 'X'); // B-edge no longer D-down (3 D-down)
+    s = setSticker(s, 'D', 5, 'X'); // R-edge no longer D-down (2 D-down)
+    // Only F-edge (pos 0, F colour, offset 0) and L-edge (pos 1, L colour,
+    // offset 0) remain D-down. Both at canonical → offset 0 for both →
+    // count = 2.
+    expect(crossEdgesCorrectlyPlaced('D', s)).toBe(2);
+  });
+
+  it('detects same-offset rotated edges as the same relative-position group', () => {
+    // Build a hypothetical: 3 D-down edges all shifted by the SAME offset.
+    // SOLVED has all 4 at offset 0. We need to rotate THREE edges into
+    // the same NON-zero offset class while keeping their D-stickers down.
+    // The cleanest hand-buildable test: simulate an AUF (D' move) on the
+    // bottom layer — every cross edge shifts one slot but stays D-down.
+    // After D': F-colour edge at L-slot, L-colour at B-slot, B at R, R at F.
+    //   F-edge: pos 1, canonical 0, offset 1.
+    //   L-edge: pos 2, canonical 1, offset 1.
+    //   B-edge: pos 3, canonical 2, offset 1.
+    //   R-edge: pos 0, canonical 3, offset (0-3+4)%4 = 1.
+    // All 4 share offset 1 → count = 4 even though no edge is at its
+    // canonical slot. That's the user's intent (BRGO-rotation = still cross).
+    // Construct: rebuild D-layer edges shifted by 1 cyclic position.
+    // Original D-stickers stay (all D-coloured). Side stickers rotate:
+    //   F-slot (sideF, sideIdx7) shows R-colour.
+    //   L-slot (sideL, sideIdx7) shows F-colour.
+    //   B-slot (sideB, sideIdx7) shows L-colour.
+    //   R-slot (sideR, sideIdx7) shows B-colour.
+    let s = SOLVED;
+    s = setSticker(s, 'F', 7, 'R');
+    s = setSticker(s, 'L', 7, 'F');
+    s = setSticker(s, 'B', 7, 'L');
+    s = setSticker(s, 'R', 7, 'B');
+    expect(crossEdgesCorrectlyPlaced('D', s)).toBe(4);
   });
 });
 

@@ -127,6 +127,88 @@ export function isCrossDoneOn(face: Face, facelets: string): boolean {
   return true;
 }
 
+// For each cross face X, the 4 D-layer cross-edge slots in cyclic
+// order CW-from-outside-X. Each entry encodes the X-sticker index +
+// (sideFace, sideStickerIdx) for the edge at that slot. Used by
+// crossEdgesCorrectlyPlaced for the max-consecutive-relative-position
+// count rule.
+const CROSS_CYCLIC: Record<Face, Array<{ sideFace: Face; xIdx: number; sideIdx: number }>> = {
+  D: [
+    { sideFace: 'F', xIdx: 1, sideIdx: 7 },
+    { sideFace: 'L', xIdx: 3, sideIdx: 7 },
+    { sideFace: 'B', xIdx: 7, sideIdx: 7 },
+    { sideFace: 'R', xIdx: 5, sideIdx: 7 },
+  ],
+  U: [
+    { sideFace: 'F', xIdx: 7, sideIdx: 1 },
+    { sideFace: 'R', xIdx: 5, sideIdx: 1 },
+    { sideFace: 'B', xIdx: 1, sideIdx: 1 },
+    { sideFace: 'L', xIdx: 3, sideIdx: 1 },
+  ],
+  F: [
+    { sideFace: 'U', xIdx: 1, sideIdx: 7 },
+    { sideFace: 'R', xIdx: 5, sideIdx: 3 },
+    { sideFace: 'D', xIdx: 7, sideIdx: 1 },
+    { sideFace: 'L', xIdx: 3, sideIdx: 5 },
+  ],
+  B: [
+    { sideFace: 'U', xIdx: 1, sideIdx: 1 },
+    { sideFace: 'L', xIdx: 5, sideIdx: 3 },
+    { sideFace: 'D', xIdx: 7, sideIdx: 7 },
+    { sideFace: 'R', xIdx: 3, sideIdx: 5 },
+  ],
+  R: [
+    { sideFace: 'U', xIdx: 1, sideIdx: 5 },
+    { sideFace: 'B', xIdx: 5, sideIdx: 3 },
+    { sideFace: 'D', xIdx: 7, sideIdx: 5 },
+    { sideFace: 'F', xIdx: 3, sideIdx: 5 },
+  ],
+  L: [
+    { sideFace: 'U', xIdx: 1, sideIdx: 3 },
+    { sideFace: 'F', xIdx: 5, sideIdx: 3 },
+    { sideFace: 'D', xIdx: 7, sideIdx: 3 },
+    { sideFace: 'B', xIdx: 3, sideIdx: 5 },
+  ],
+};
+
+// Returns 0..4: the max number of D-down cross edges (edges with X-
+// colour on the X face) that are in correct positions RELATIVE to one
+// another. The rule, from the user:
+//   - An edge "counts" only if its X-colour sticker is on the X face.
+//   - Among those D-down edges, find the longest cyclic-consecutive run
+//     where edges' actual relative positions match their colours' canon-
+//     ical relative positions in the cube's side-colour cycle (BRGO for
+//     D=white, etc. — derived from each side face's centre colour).
+//   - Implementation: for each D-down edge, compute offset = (actual_pos
+//     - canonical_pos) mod 4. Edges sharing an offset are in correct
+//     relative positions. Max group size = count.
+// Equals isCrossDoneOn (returns 4) iff full cross is solved.
+export function crossEdgesCorrectlyPlaced(face: Face, facelets: string): number {
+  const X = faceStickers(facelets, face);
+  const xCentre = X[4];
+  const positions = CROSS_CYCLIC[face];
+  // canonical_pos[colour] = cyclic index where an edge of that colour
+  // canonically belongs (= position whose side centre is that colour).
+  const canonicalIdxByColor = new Map<string, number>();
+  for (let i = 0; i < 4; i++) {
+    const sideCentre = faceStickers(facelets, positions[i].sideFace)[4];
+    canonicalIdxByColor.set(sideCentre, i);
+  }
+  const offsetCounts = new Map<number, number>();
+  for (let p = 0; p < 4; p++) {
+    const pos = positions[p];
+    if (X[pos.xIdx] !== xCentre) continue; // not D-down
+    const sideSticker = faceStickers(facelets, pos.sideFace)[pos.sideIdx];
+    const canonicalPos = canonicalIdxByColor.get(sideSticker);
+    if (canonicalPos === undefined) continue; // shouldn't happen on a valid cube
+    const offset = ((p - canonicalPos) % 4 + 4) % 4;
+    offsetCounts.set(offset, (offsetCounts.get(offset) ?? 0) + 1);
+  }
+  let maxCount = 0;
+  for (const c of offsetCounts.values()) if (c > maxCount) maxCount = c;
+  return maxCount;
+}
+
 export function isF2LDoneOn(face: Face, facelets: string): boolean {
   if (!isFaceMono(facelets, face)) return false;
   for (const [side, indices] of F2L_BAND[face]) {

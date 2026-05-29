@@ -134,6 +134,7 @@ describe('mergeImportedHistory — full-record round-trip contract', () => {
     twoLookPll: true,
     turns: [0.21, 0.45, 0.83, 1.4, 2.1, 3.6, 5.8, 9.1, 11.2],
     f2lSplits: [1100, 2300, 3500, 5000],
+    crossSplits: [300, 500, 750, 1000],
     inspectionMs: 14750,
     inspectionAutoExpired: true,
     aborted: true,

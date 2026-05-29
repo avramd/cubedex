@@ -51,6 +51,12 @@ export interface SolveRecord {
   // records made before this field — graph renders those as a single
   // F2L band even with the toggle on.
   f2lSplits?: number[];
+  // Same shape as f2lSplits but for the cross stage: 4 monotonic ms-
+  // from-solve-start entries marking when the cross-edge correctness
+  // count first hit 1, 2, 3, 4. Derived post-hoc via replay (see
+  // recomputeMissingSplitsFor); the live recorder doesn't track this
+  // since the cross face isn't known until cross is done.
+  crossSplits?: number[];
   // Wall-clock duration of the inspection phase in ms (from "scramble
   // complete" to "solve start"). Used by the CSV export to emit a single
   // `inspection` row with a negative timestamp.

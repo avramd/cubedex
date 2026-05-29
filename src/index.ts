@@ -26,8 +26,9 @@ import {
 } from 'smartcube-web-bluetooth';
 
 import { faceletsToPattern, patternToFacelets } from './utils';
+import { COPY_ICON } from './icons';
 import {
-  initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, isFullSolveModeEnabled,
+  initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, fsSetConnectStatus, isFullSolveModeEnabled,
   setOnLocalScrambleChange, setOnShareStateChange, isSharingScrambles,
   setPeerSharingScrambles, applyRemoteFsScramble, setShareScramblesNetVisible,
   getCurrentFsScramble,
@@ -820,7 +821,7 @@ $('#net-copy-btn').on('click', () => {
   $btn.text('✓').addClass('text-green-500 dark:text-green-400').removeClass('text-gray-500');
   setTimeout(() => {
     $code.removeClass('text-green-500 dark:text-green-400').addClass('text-gray-900 dark:text-white');
-    $btn.text('📋').removeClass('text-green-500 dark:text-green-400').addClass('text-gray-500');
+    $btn.text(COPY_ICON).removeClass('text-green-500 dark:text-green-400').addClass('text-gray-500');
   }, 1000);
 });
 
@@ -1937,6 +1938,7 @@ $('#connect-button').on('click', async () => {
   if (connectInFlight) {
     connectAbort?.abort();
     $('#connect').html('Connect');
+    fsSetConnectStatus(null);
     connectInFlight = false;
     connectAbort = null;
     return;
@@ -1954,14 +1956,18 @@ $('#connect-button').on('click', async () => {
       signal: connectAbort.signal,
       onStatus: (msg) => {
         $('#connect').html(msg);
+        fsSetConnectStatus({ text: msg, error: false });
       },
     });
   } catch (e) {
     const aborted = e instanceof DOMException && e.name === 'AbortError';
-    if (!aborted) {
+    if (aborted) {
+      fsSetConnectStatus(null);
+    } else {
       console.error(e);
       const msg = e instanceof Error ? e.message : String(e);
       window.alert(msg);
+      fsSetConnectStatus({ text: msg, error: true });
     }
     $('#connect').html('Connect');
   } finally {

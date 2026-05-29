@@ -3,10 +3,11 @@ import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
+import { COPY_ICON } from './icons';
 import { type Face, FACES, OPPOSITE, faceStickers, isSolved } from './cube/facelets';
 import {
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
-  f2lSlotsDoneOn, F2L_SLOTS,
+  f2lSlotsDoneOn, F2L_SLOTS, crossEdgesCorrectlyPlaced,
   isRouxFirstBlockDoneOn, isRouxSecondBlockDoneOn,
   areTopCornersOrientedOn, isLSEOrientedOn, isLREDoneOn,
 } from './cube/predicates';
@@ -211,6 +212,9 @@ function mergeImportedHistory(incoming: any[]): { added: number; replaced: numbe
 
 interface ReplayDerived {
   f2lSplits?: number[];
+  // 4 entries: ms-from-solve-start when the "correct-relative-position
+  // cross edge count" first hit 1, 2, 3, 4. Same shape as f2lSplits.
+  crossSplits?: number[];
   // ms durations (not absolute timestamps). Cumulatively: cross_ms +
   // f2l_ms + eoll + ocll + cpll + epll === totalMs (approximately).
   twoLookOll?: { eoll: number; ocll: number };
@@ -234,6 +238,16 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   let crossFace: Face | null = null;
   let slotsEver = 0;
   const f2lSplits: number[] = [];
+  // crossSplits is derived BEFORE crossFace is locked — color-neutral
+  // solvers may build the cross on any face, so we track the count per
+  // candidate face in parallel and pick the right series once the
+  // cross-done event picks a face.
+  const crossSplitsByFace: Record<Face, number[]> = {
+    U: [], D: [], F: [], B: [], R: [], L: [],
+  };
+  const crossSeenByFace: Record<Face, number> = {
+    U: 0, D: 0, F: 0, B: 0, R: 0, L: 0,
+  };
   // Absolute ms-from-solve-start at first detection of each LL phase.
   let eollAt: number | null = null;
   let ocllAt: number | null = null;
@@ -244,14 +258,27 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
     physicalIdx += t.endsWith('2') ? 2 : 1;
     let facelets: string;
     try { facelets = patternToFacelets(p); } catch { continue; }
+    const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
+    const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
+    // Cross-edge-count sub-phase tracking. Once a face's count first
+    // hits 1, 2, 3, 4 we record the absolute ms — no rollback if the
+    // count later decreases, mirroring f2lSplits' first-completion
+    // semantics. Tracked for every candidate face so we have the data
+    // ready whichever face the solver ends up choosing as the cross.
+    for (const f of FACES) {
+      if (crossSeenByFace[f] >= 4) continue;
+      const cnt = crossEdgesCorrectlyPlaced(f, facelets);
+      while (crossSeenByFace[f] < cnt) {
+        crossSeenByFace[f]++;
+        crossSplitsByFace[f].push(tMs);
+      }
+    }
     if (!crossFace) {
       for (const f of FACES) {
         if (isCrossDoneOn(f, facelets)) { crossFace = f; break; }
       }
       if (!crossFace) continue;
     }
-    const tIdx = Math.min(physicalIdx, r.turns.length) - 1;
-    const tMs = Math.round((r.turns[tIdx] ?? 0) * 1000);
     if (slotsEver < 4) {
       const slots = f2lSlotsDoneOn(crossFace, facelets);
       while (slots > slotsEver) {
@@ -278,6 +305,13 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   }
   const out: ReplayDerived = {};
   if (f2lSplits.length > 0) out.f2lSplits = f2lSplits;
+  // Surface crossSplits for the face the solver actually built the
+  // cross on. Falls back to whichever face hit count = 4 first (or 3
+  // if the solve aborted before the cross fully sealed). Records that
+  // never reach a 4-count produce no crossSplits.
+  if (crossFace && crossSplitsByFace[crossFace].length === 4) {
+    out.crossSplits = crossSplitsByFace[crossFace];
+  }
   if (eollAt !== null && ocllAt !== null) {
     // f2l-done ms-from-solveStart = cross_ms + f2l_ms (stored).
     const f2lDoneMs = (r.phases?.cross ?? 0) + (r.phases?.f2l ?? 0);
@@ -421,14 +455,19 @@ function backfillF2lSplits() {
     if (!r.turns || r.turns.length === 0) continue;
     if (r.process === 'beginner') continue;
     const hasF2l = !!r.f2lSplits;
+    const hasCross = !!r.crossSplits;
     const hasOllSplit = typeof r.phases?.eoll === 'number' && typeof r.phases?.ocll === 'number';
     const hasPllSplit = typeof r.phases?.cpll === 'number' && typeof r.phases?.epll === 'number';
-    if (hasF2l && hasOllSplit && hasPllSplit) continue;
+    if (hasF2l && hasCross && hasOllSplit && hasPllSplit) continue;
     const derived = recomputeMissingSplitsFor(r);
     if (!derived) continue;
     let touched = false;
     if (!hasF2l && derived.f2lSplits) {
       r.f2lSplits = derived.f2lSplits;
+      touched = true;
+    }
+    if (!hasCross && derived.crossSplits) {
+      r.crossSplits = derived.crossSplits;
       touched = true;
     }
     if (!hasOllSplit && derived.twoLookOll) {
@@ -819,27 +858,23 @@ function currentPhaseSequence(): PhaseDef[] {
 // aggregates, lower-stacked sub-phase first), then PLL/LSE phase
 // (same), then the Beginner aggregate at the very top.
 const CANONICAL_KEY_ORDER: readonly string[] = [
-  'setup', 'cross', 'f1b',
-  // Roux/F3uL block-stage sub-shades (Scheme 1 = block-aware; Scheme 2
-  // = pair-count). At most one of these key families appears for a
-  // given record + scheme; the other contributes 0 across the slice.
-  'b1_pre', 'b1_done', 'b2_pre', 'b2_done',
-  'rp1', 'rp2', 'rp3', 'rp4',
-  'f2l', 'f2b', 'fml',
+  'setup',
+  // Early phase ("cross") — aggregate slot key. renderGraph always
+  // expands this into cross_1..cross_4 (4 pink sub-bands, lightest→
+  // darkest). CFOP records put their whole cross into cross_3 (current
+  // pink shade) until per-cross-edge tracking lands. Roux/F3uL fill
+  // cross_1 (1st pair) + cross_3 (1st block done); cross_2 and cross_4
+  // stay empty (the "skip" slots).
+  'cross',
+  // Middle phase ("f2l") — aggregate slot key, same pattern as 'cross'.
+  // Stays single when prefs.f2lSplits is off; otherwise renderGraph
+  // expands into f2l_1..f2l_4. F3uL fills f2l_1..f2l_3 (2nd-block pair
+  // 1, pair 2, FML), skipping f2l_4. Roux fills f2l_1..f2l_2 only.
+  'f2l',
   // OLL/CMLL phase
-  'eoll',
-  'ocll',
-  'oll',
-  'opll',
-  'cmll',
+  'eoll', 'ocll', 'oll', 'opll', 'cmll',
   // PLL/LSE phase
-  'cpll',
-  'lseo',
-  'lre',
-  'epll',
-  'opme',
-  'pll',
-  'lse',
+  'cpll', 'lseo', 'lre', 'epll', 'opme', 'pll', 'lse',
   'll',
 ];
 
@@ -882,13 +917,196 @@ function displayPhaseSequenceFor(r: SolveRecord): string[] {
   return ['cross', 'f2l', ...oll, ...pll];
 }
 
-// Union of every key any record in `records` would display, ordered
-// per CANONICAL_KEY_ORDER. Used as the stacked-area chart's dataset
-// order. Roux's LRE/OPME/LSEO bands "come and go" automatically: they
-// only appear when a Roux solve with split LSE is in the filtered view.
+// CHART-SPECIFIC slot sequence. The multi-solve stacked-area chart uses
+// a UNIFIED set of slot keys across processes so that conceptually-
+// equivalent phases share the same dataset across CFOP, F3uL, Roux,
+// Beginner. That way the boundary between solves of different processes
+// is visually continuous instead of showing every per-process key drop
+// to zero and a new one rise from zero.
+//
+// Slot map (in stack order, bottom → top):
+//   'cross_1'..'cross_4'   — EARLY phase, 4 pink sub-bands.
+//     CFOP (once cross sub-phase tracking lands): per-cross-edge-count
+//       splits. Until tracked, the whole cross sits at cross_3.
+//     Roux/F3uL scheme 1: 1st-block pair 1 → cross_1; 1st block done →
+//       cross_3. cross_2 + cross_4 = "skips".
+//     Roux/F3uL scheme 2: 1st chronological pair → cross_1; 2nd pair
+//       (= 1st block done) → cross_3. cross_2 + cross_4 = "skips".
+//     Roux/F3uL fallback: full f1b → cross_3.
+//   'f2l'/'f2l_1..4'       — MIDDLE phase, single band or 4 green sub-
+//     bands per prefs.f2lSplits.
+//     CFOP: r.f2lSplits drive f2l_1..f2l_4.
+//     F3uL scheme 1: b2_pre → f2l_1, b2_done → f2l_2, fml → f2l_3,
+//       f2l_4 = skip.
+//     F3uL scheme 2: rp3 → f2l_1, rp4 → f2l_2, fml → f2l_3, f2l_4 = skip.
+//     F3uL fallback: f2b → f2l_1, fml → f2l_3, others = skip.
+//     Roux variants drop fml entirely — f2l_3 + f2l_4 both = skip.
+//   <LL keys>              — LATE + FINAL phases. CFOP/F3uL share
+//     oll/pll (and 2-look splits). Roux's CMLL/LSE keys remain
+//     distinct since they don't correspond to OLL/PLL.
+function chartSlotSequenceFor(r: SolveRecord): string[] {
+  if (r.process === 'beginner') return ['setup', 'll'];
+  const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+  const hasScheme1 = typeof r.rouxBlock1FirstPairMs === 'number'
+                   && typeof r.rouxBlock2FirstPairMs === 'number';
+  // Mirror F2L: emit a single 'cross' / 'f2l' aggregate key per record.
+  // renderGraph expands those into cross_1..cross_4 / f2l_1..f2l_4
+  // sub-bands for the chart datasets. The legend (which uses
+  // unifiedKeyOrder directly) sees one entry per aggregate — keeping
+  // the legend clean instead of repeating "Cross" four times.
+  void hasGranular; void hasScheme1; // referenced by chartSlotMs; kept here for symmetry
+  if (r.process === 'roux') {
+    const oll = prefs.twoLookCmll ? ['ocll', 'opll'] : ['cmll'];
+    const lse = prefs.threeLookLse ? ['lseo', 'lre', 'opme'] : ['lse'];
+    return ['cross', 'f2l', ...oll, ...lse];
+  }
+  // cfop AND f3ul share the OLL/PLL tail.
+  const oll = prefs.twoLookOll ? ['eoll', 'ocll'] : ['oll'];
+  const pll = prefs.twoLookPll ? ['cpll', 'epll'] : ['pll'];
+  return ['cross', 'f2l', ...oll, ...pll];
+}
+
+// CHART-SPECIFIC ms-per-slot. Translates a unified slot key to the
+// record's underlying phase ms, scheme- and process-aware. For LL
+// slots, delegates to phaseMsForDisplay (no translation needed). For
+// early/middle slots, picks the right stored phase per (process,
+// scheme).
+function chartSlotMs(r: SolveRecord, slot: string): number {
+  const p = r.phases || {};
+  // ----- Early phase -----
+  if (slot === 'cross_1' || slot === 'cross_2' || slot === 'cross_3' || slot === 'cross_4') {
+    if (r.process === 'cfop') {
+      // CFOP cross sub-band durations. With crossSplits present
+      // (replay-derived for any solve with r.turns), distribute the cross
+      // duration across cross_1..cross_4 by the count-transition timings.
+      // Legacy records without r.turns fall back to the whole cross at
+      // cross_3 (current pink shade — visually identical to pre-tracking).
+      const cs = r.crossSplits;
+      if (cs && cs.length === 4) {
+        if (slot === 'cross_1') return cs[0];
+        if (slot === 'cross_2') return Math.max(0, cs[1] - cs[0]);
+        if (slot === 'cross_3') return Math.max(0, cs[2] - cs[1]);
+        if (slot === 'cross_4') return Math.max(0, cs[3] - cs[2]);
+      }
+      return slot === 'cross_3' ? (p.cross ?? 0) : 0;
+    }
+    if (r.process === 'roux' || r.process === 'f3ul') {
+      const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+      const hasScheme1 = typeof r.rouxBlock1FirstPairMs === 'number'
+                       && typeof r.rouxBlock2FirstPairMs === 'number';
+      const scheme1 = prefs.rouxColorScheme === 1 && hasScheme1;
+      const scheme2 = prefs.rouxColorScheme === 2 && hasGranular;
+      if (slot === 'cross_1') {
+        if (scheme1) return phaseMsForDisplay(r, 'b1_pre');
+        if (scheme2) return phaseMsForDisplay(r, 'rp1');
+        return 0;
+      }
+      if (slot === 'cross_3') {
+        if (scheme1) return phaseMsForDisplay(r, 'b1_done');
+        if (scheme2) return phaseMsForDisplay(r, 'rp2');
+        return p.f1b ?? 0;
+      }
+      return 0; // cross_2, cross_4 = skips for Roux/F3uL
+    }
+    return 0;
+  }
+  // ----- Middle phase -----
+  if (slot === 'f2l') {
+    if (r.process === 'cfop') return phaseMsForDisplay(r, 'f2l');
+    if (r.process === 'roux' || r.process === 'f3ul') {
+      return (p.f2b ?? 0) + (r.process === 'f3ul' ? (p.fml ?? 0) : 0);
+    }
+    return 0;
+  }
+  if (slot === 'f2l_1' || slot === 'f2l_2' || slot === 'f2l_3' || slot === 'f2l_4') {
+    if (r.process === 'cfop') return phaseMsForDisplay(r, slot);
+    if (r.process === 'roux' || r.process === 'f3ul') {
+      const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+      const hasScheme1 = typeof r.rouxBlock1FirstPairMs === 'number'
+                       && typeof r.rouxBlock2FirstPairMs === 'number';
+      const scheme1 = prefs.rouxColorScheme === 1 && hasScheme1;
+      const scheme2 = prefs.rouxColorScheme === 2 && hasGranular;
+      if (slot === 'f2l_1') {
+        if (scheme1) return phaseMsForDisplay(r, 'b2_pre');
+        if (scheme2) return phaseMsForDisplay(r, 'rp3');
+        return p.f2b ?? 0;
+      }
+      if (slot === 'f2l_2') {
+        if (scheme1) return phaseMsForDisplay(r, 'b2_done');
+        if (scheme2) return phaseMsForDisplay(r, 'rp4');
+        return 0;
+      }
+      if (slot === 'f2l_3') {
+        return r.process === 'f3ul' ? (p.fml ?? 0) : 0;
+      }
+      return 0; // f2l_4 = skip for Roux/F3uL
+    }
+    return 0;
+  }
+  // ----- Everything else (LL slots, setup, etc.) delegates -----
+  return phaseMsForDisplay(r, slot);
+}
+
+// CHART HOVER CHIT LABEL — picks a per-record, per-scheme short label
+// for the unified chart slot keys. CFOP F2L uses pair-count labels
+// (1Pr..4Pr); Roux/F3uL scheme 1 uses square + block milestones
+// (1Sq/1Blk, 3Sq/2Blk, FML); scheme 2 uses chronological pair count
+// (1Pr..4Pr, FML). Records without granular sub-band data fall back to
+// aggregate labels (F2L for CFOP, 1Blk/2Blk/FML for Roux/F3uL).
+function chitLabelFor(r: SolveRecord, slot: string): string {
+  if (r.process === 'cfop') {
+    if (slot.startsWith('cross_')) {
+      // With crossSplits (replay-derived), each sub-band gets its own
+      // "{n}Cr" chit. Records without crossSplits put the entire cross
+      // at cross_3 → use the aggregate "Cross" label there.
+      if (slot === 'cross_3' && !r.crossSplits) return 'Cross';
+      const n = parseInt(slot.slice(6), 10);
+      return `${n}Cr`;
+    }
+    if (slot.startsWith('f2l_')) {
+      // Legacy records without f2lSplits collapse to one aggregate chit
+      // (chitLabelForSubBand respects this — see chit loop guard).
+      const n = parseInt(slot.slice(4), 10);
+      return `${n}Pr`;
+    }
+    return PHASE_KEY_LABELS[slot] ?? slot;
+  }
+  if (r.process === 'roux' || r.process === 'f3ul') {
+    const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+    const hasScheme1 = typeof r.rouxBlock1FirstPairMs === 'number'
+                     && typeof r.rouxBlock2FirstPairMs === 'number';
+    const scheme1 = prefs.rouxColorScheme === 1 && hasScheme1;
+    const scheme2 = prefs.rouxColorScheme === 2 && hasGranular;
+    if (scheme1) {
+      if (slot === 'cross_1') return '1Sq';
+      if (slot === 'cross_3') return '1Blk';
+      if (slot === 'f2l_1')   return '3Sq';
+      if (slot === 'f2l_2')   return '2Blk';
+      if (slot === 'f2l_3')   return 'FML';
+    } else if (scheme2) {
+      if (slot === 'cross_1') return '1Pr';
+      if (slot === 'cross_3') return '2Pr';
+      if (slot === 'f2l_1')   return '3Pr';
+      if (slot === 'f2l_2')   return '4Pr';
+      if (slot === 'f2l_3')   return 'FML';
+    } else {
+      // No granular data — block-level aggregates.
+      if (slot === 'cross_3') return '1Blk';
+      if (slot === 'f2l_1')   return '2Blk';
+      if (slot === 'f2l_3')   return 'FML';
+    }
+    return PHASE_KEY_LABELS[slot] ?? slot;
+  }
+  return PHASE_KEY_LABELS[slot] ?? slot;
+}
+
+// Union of every chart slot any record in `records` contributes to,
+// ordered per CANONICAL_KEY_ORDER. Drives the stacked-area chart's
+// dataset list. Roux's LRE/OPME/LSEO bands come and go automatically:
+// they only appear when a Roux solve with split LSE is in the slice.
 function unifiedKeyOrder(records: SolveRecord[]): string[] {
   const seen = new Set<string>();
-  for (const r of records) for (const k of displayPhaseSequenceFor(r)) seen.add(k);
+  for (const r of records) for (const k of chartSlotSequenceFor(r)) seen.add(k);
   return CANONICAL_KEY_ORDER.filter(k => seen.has(k));
 }
 
@@ -1067,14 +1285,15 @@ let graphChart: Chart | null = null;
 // Click-to-focus on a phase group in the main history graph. null = no
 // focus (full stack visible). Set by a click within a phase band; cleared
 // by a click outside the focused band (or on the cross / empty space).
-let focusedPhaseGroup: 'f2l' | 'll' | null = null;
+let focusedPhaseGroup: 'cross' | 'f2l' | 'll' | null = null;
 
 const F2L_KEYS = new Set(['f2l', 'f2l_1', 'f2l_2', 'f2l_3', 'f2l_4']);
 const LL_KEYS  = new Set(['oll', 'pll', 'eoll', 'ocll', 'cpll', 'epll', 'll']);
 
 function groupOfKey(k: string): 'cross' | 'f2l' | 'll' | null {
   if (k.startsWith('idle:')) k = k.slice(5);
-  if (k === 'cross' || k === 'setup') return 'cross';
+  // 'cross_1..cross_4' = the 4 sub-bands of the unified early phase.
+  if (k === 'cross' || k === 'setup' || k.startsWith('cross_')) return 'cross';
   if (F2L_KEYS.has(k)) return 'f2l';
   if (LL_KEYS.has(k))  return 'll';
   return null;
@@ -1312,26 +1531,54 @@ function renderStatsBoxes() {
   }
 }
 
-// Classes that turn the status line into a dotted-border banner. Applied
-// when Full Solve is enabled but no smartcube is connected (the only state
-// in which we show "Connect a smart cube to track your solves." in place
-// of the normal status text).
-const NO_CUBE_BANNER_CLASSES = ['px-2', 'py-1', 'border', 'border-dashed', 'border-gray-400', 'dark:border-gray-500', 'rounded', 'inline-block'];
+// Tailwind classes for the clickable "Connect a smart cube" button —
+// the visible dotted-border affordance that replaces the status line
+// when Full Solve is enabled but no smartcube is connected. Clicking
+// it triggers the same flow as the top-bar Connect button, so the
+// user doesn't have to scroll up while focused on solves + graphs.
+const CONNECT_CUBE_BTN_CLASSES_IDLE  = 'px-2 py-1 border border-dashed border-gray-400 dark:border-gray-500 rounded inline-block cursor-pointer';
+const CONNECT_CUBE_BTN_CLASSES_ERROR = 'px-2 py-1 border border-dashed border-red-500 dark:border-red-400 text-red-600 dark:text-red-400 rounded inline-block cursor-pointer';
+
+// Optional override for the button text — mirrors the top-bar Connect
+// button's status messages while a connect attempt is in flight, and
+// shows an error message if the attempt fails. Null = render the
+// default "Connect a smart cube" + trailing prose. Set by index.ts
+// via fsSetConnectStatus.
+let connectStatus: { text: string; error: boolean } | null = null;
 
 function updateCubeGate() {
   // When Full Solve is enabled and no cube is connected, the status line
-  // becomes a dotted "Connect a smart cube…" banner. When connected (or
-  // Full Solve is off), the banner styling is stripped and renderStatus
-  // is free to drive the line again.
+  // becomes a dotted "Connect a smart cube" button followed by trailing
+  // "to track your solves." prose. While connecting, the button text
+  // mirrors the top-bar Connect button's progress messages (no trailing
+  // prose); on error, the same box turns red and shows the error.
   const status = fsStatusEl();
+  if (!status) return;
   const showBanner = prefs.enabled && !cubeConnected;
-  if (status) {
-    if (showBanner) {
-      status.textContent = 'Connect a smart cube to track your solves.';
-      status.classList.add(...NO_CUBE_BANNER_CLASSES);
-    } else {
-      status.classList.remove(...NO_CUBE_BANNER_CLASSES);
+  if (showBanner) {
+    status.replaceChildren();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = connectStatus?.text ?? 'Connect a smart cube';
+    btn.className = connectStatus?.error
+      ? CONNECT_CUBE_BTN_CLASSES_ERROR
+      : CONNECT_CUBE_BTN_CLASSES_IDLE;
+    btn.addEventListener('click', () => {
+      // Clear any stale error so a retry shows fresh progress text.
+      if (connectStatus?.error) { connectStatus = null; updateCubeGate(); }
+      document.getElementById('connect-button')?.click();
+    });
+    status.appendChild(btn);
+    // Trailing prose is only meaningful in the idle state — when we're
+    // showing live progress or an error, the box stands alone.
+    if (!connectStatus) {
+      const trailing = document.createElement('span');
+      trailing.textContent = ' to track your solves.';
+      trailing.className = 'text-xs text-gray-500 dark:text-gray-400 ml-1';
+      status.appendChild(trailing);
     }
+  } else if (status.querySelector('button')) {
+    status.replaceChildren();
   }
 }
 
@@ -2069,6 +2316,24 @@ function finishSolve() {
         : {}),
   };
   history.push(record);
+  // Reverse-engineer per-sub-phase splits from the just-captured scramble
+  // + solution + r.turns. The live tracker can drop data in edge cases
+  // (cross face not yet locked, down-face race, etc.), so the replay is
+  // the authoritative pass. Mutates the record in place to add anything
+  // missing without disturbing whatever the live path captured.
+  if (record.turns && record.turns.length > 0) {
+    if (record.process === 'cfop') {
+      const derived = recomputeMissingSplitsFor(record);
+      if (derived?.crossSplits && !record.crossSplits) record.crossSplits = derived.crossSplits;
+    }
+    if (record.process === 'roux' || record.process === 'f3ul') {
+      // Always replay for Roux/F3uL — live tracking has edge cases (the
+      // down-face / first-block-side dispatch can mis-fire, leaving
+      // rouxBlock1FirstPairMs equal to f1b so b1_done ≈ 0). The replay
+      // sees the whole solve at once and is the source of truth.
+      recomputeRouxPairTimingsFor(record);
+    }
+  }
   saveHistory();
   renderGraph();
   renderStatsBoxes();
@@ -2240,6 +2505,20 @@ function renderGraph() {
   // stacked band. phaseMsForDisplay handles the per-record split using
   // r.f2lSplits; non-CFOP records have no f2l data so render as 0.
   let keyOrder = unifiedKeyOrder(slice);
+  // Always expand the early-phase 'cross' aggregate into 4 sub-band
+  // datasets. Records with no granular cross data put their full cross
+  // value at cross_3 (current pink shade) — visually identical to the
+  // old single-cross-band rendering — and contribute 0 to the others.
+  {
+    const cIdx = keyOrder.indexOf('cross');
+    if (cIdx >= 0) {
+      keyOrder = [
+        ...keyOrder.slice(0, cIdx),
+        'cross_1', 'cross_2', 'cross_3', 'cross_4',
+        ...keyOrder.slice(cIdx + 1),
+      ];
+    }
+  }
   if (prefs.f2lSplits) {
     const fIdx = keyOrder.indexOf('f2l');
     if (fIdx >= 0) {
@@ -2250,9 +2529,12 @@ function renderGraph() {
       ];
     }
   }
-  // Precompute each solve's allowed key set so the cumulative loop can
-  // gate contributions without recomputing per (solve, key) pair.
-  const sliceKeySets: Array<Set<string>> = slice.map(r => new Set(displayPhaseSequenceFor(r)));
+  // Precompute each solve's allowed CHART SLOT set so the cumulative
+  // loop can gate contributions without recomputing per (solve, slot)
+  // pair. Uses chartSlotSequenceFor (the unified cross-process slot
+  // sequence) so different processes can share datasets at the same
+  // stack position — see chartSlotSequenceFor for the slot model.
+  const sliceKeySets: Array<Set<string>> = slice.map(r => new Set(chartSlotSequenceFor(r)));
   // Phase-focus: when set, the graph hides every band outside the focused
   // group (F2L or LL) and re-baselines the remaining bands from zero, so
   // the user can inspect just that phase's variation without the rest of
@@ -2292,6 +2574,16 @@ function renderGraph() {
       // (PHASE_COLORS[1] itself uses 0.75 to match the topmost sub-band.)
       return PHASE_COLORS[1].replace(/,\s*[\d.]+\)\s*$/, `, ${a})`);
     }
+    if (k.startsWith('cross_')) {
+      // Pink gradient mirroring F2L_SUB_ALPHAS. cross_1 = lightest (also
+      // serves as Roux/F3uL "1st pair"); cross_3 = the current cross
+      // pink (also serves as Roux/F3uL "1st block done"); cross_4 = the
+      // new darkest pink for "full cross done" (used once CFOP cross
+      // sub-phase tracking lands).
+      const n = parseInt(k.slice(6), 10);
+      const a = CROSS_SUB_ALPHAS[n - 1] ?? 0.6;
+      return PHASE_COLORS[0].replace(/,\s*[\d.]+\)\s*$/, `, ${a})`);
+    }
     // Cross-process color lookup via the global key→color map (covers
     // every process's keys, not just the current one).
     return PHASE_COLOR_BY_KEY[k] ?? PHASE_COLORS[0];
@@ -2308,6 +2600,15 @@ function renderGraph() {
       }
       return 'F2L';
     }
+    if (k.startsWith('cross_')) {
+      // 4 sub-bands of the unified early phase. cross_1 is the
+      // Roux/F3uL "1st pair" sub-band (no CFOP equivalent yet);
+      // cross_3 carries the aggregate "Cross" chit (showing the
+      // whole early-phase time, summed across sub-bands — same
+      // collapse pattern as F2L).
+      if (k === 'cross_1') return '1pr';
+      return 'Cross';
+    }
     return PHASE_KEY_LABELS[k] ?? k;
   };
 
@@ -2323,8 +2624,9 @@ function renderGraph() {
     const allowed = sliceKeySets[solveIdx];
     // For F2L sub-bands, the record's allowed-key check is on 'f2l'.
     const allowsKey = (k: string) => {
-      if (k.startsWith('idle:')) k = k.slice(5);
-      if (k.startsWith('f2l_'))  return allowed.has('f2l');
+      if (k.startsWith('idle:'))  k = k.slice(5);
+      if (k.startsWith('f2l_'))   return allowed.has('f2l');
+      if (k.startsWith('cross_')) return allowed.has('cross');
       return allowed.has(k);
     };
     for (const k of keyOrder) {
@@ -2345,14 +2647,14 @@ function renderGraph() {
       }
       if (k.startsWith('idle:')) {
         const phaseKey = k.slice(5);
-        const totalMs = phaseMsForDisplay(r, phaseKey);
+        const totalMs = chartSlotMs(r, phaseKey);
         segmentMs = totalMs > 0 ? Math.min(phaseIdleMsFor(r, phaseKey), totalMs) : 0;
       } else if (focusedPhaseGroup) {
-        const totalMs = phaseMsForDisplay(r, k);
+        const totalMs = chartSlotMs(r, k);
         const idleMs  = totalMs > 0 ? Math.min(phaseIdleMsFor(r, k), totalMs) : 0;
         segmentMs = totalMs - idleMs;
       } else {
-        segmentMs = phaseMsForDisplay(r, k);
+        segmentMs = chartSlotMs(r, k);
       }
       acc += segmentMs / 1000;
       cumulative[solveIdx].push(acc);
@@ -2436,12 +2738,12 @@ function renderGraph() {
   // bands instead of the whole solve.
   const recordTotalSec = (r: SolveRecord): number => {
     if (!focusedPhaseGroup) return r.totalMs / 1000;
-    const allowed = new Set(displayPhaseSequenceFor(r));
+    const allowed = new Set(chartSlotSequenceFor(r));
     let sum = 0;
     for (const k of keyOrder) {
-      const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+      const baseKey = k.startsWith('f2l_') ? 'f2l' : k.startsWith('cross_') ? 'cross' : k;
       if (!allowed.has(baseKey)) continue;
-      sum += phaseMsForDisplay(r, k);
+      sum += chartSlotMs(r, k);
     }
     return sum / 1000;
   };
@@ -2583,6 +2885,14 @@ function renderGraph() {
     id: 'inlineSplitLabels',
     afterDatasetsDraw(chart: any) {
       const idx = chart.$activeIndex;
+      // REQUIREMENT: chits are suppressed until the user actually hovers
+      // a column. After a chart rebuild (e.g., zoom in/out), $activeIndex
+      // resets to undefined, so the freshly-redrawn chart has NO chits
+      // until the next cursor move — giving the user a clean, chit-less
+      // view at the moment of the click. As soon as they move the cursor,
+      // onHover sets $activeIndex and chits come back. Do not "fix" this
+      // by seeding $activeIndex on construction — the clean-view-on-click
+      // is intentional.
       if (typeof idx !== 'number' || idx < 0) return;
       // Two-stage hover: when the cursor is inside the canvas but outside
       // the plot axes, show only aggregate (chit-less) labels and the
@@ -2617,8 +2927,9 @@ function renderGraph() {
         const meta = chart.getDatasetMeta(dsIdx);
         const point = meta.data[idx];
         if (!point) return;
-        const label = String(ds.label ?? '');
-        const isTrendline = trendlineLabels.has(label);
+        const dsLabel = String(ds.label ?? '');
+        let label = dsLabel;
+        const isTrendline = trendlineLabels.has(dsLabel);
         let valueSec: number | null = null;
         if (isTrendline) {
           const v = ds.data[idx];
@@ -2632,18 +2943,55 @@ function renderGraph() {
           // shading stripe inside each focused phase band; they're not
           // meaningful entries for the hover label stack.
           if (k.startsWith('idle:')) return;
-          // In F2L focus, emit a chit per sub-band (labelled 1P/2P/3P/4P
-          // via labelForKey); the F2L total is added separately as a
-          // chit-less entry. In any other view, collapse the 4 sub-bands
-          // into one "F2L" chit at the topmost sub-band's point and skip
-          // the lone 'f2l' chit entirely when focused (the chit-less
-          // total covers it).
+          // F2L chits: when NOT focused on F2L, collapse the 4 sub-bands
+          // into one aggregate "F2L" chit at the topmost sub-band (f2l_4)
+          // and drop f2l_1..f2l_3. When focused, emit per-sub-band chits.
+          // CROSS chits: same collapse pattern — one "Cross" chit at the
+          // topmost sub-band (cross_4 if crossSplits, else cross_3) when
+          // not focused on cross; per-sub-band when focused.
           const collapseF2lSubBands = focusedPhaseGroup !== 'f2l';
-          if (collapseF2lSubBands && k.startsWith('f2l_') && k !== 'f2l_4') return;
+          const collapseCrossSubBands = focusedPhaseGroup !== 'cross';
           if (focusedPhaseGroup === 'f2l' && k === 'f2l') return;
-          const ms = (collapseF2lSubBands && k === 'f2l_4')
-            ? phaseMsForDisplay(r, 'f2l')
-            : phaseMsForDisplay(r, k);
+          // Determine the cross "anchor" sub-band where the collapsed
+          // chit lives. CFOP with crossSplits uses cross_4 (top of the
+          // 4-band stack); records without crossSplits keep all their
+          // value at cross_3, so the chit lives there.
+          const cfopHasCrossSplits = r.process === 'cfop'
+                                  && Array.isArray(r.crossSplits)
+                                  && r.crossSplits.length === 4;
+          const crossRouxLikeTop  = (r.process === 'roux' || r.process === 'f3ul');
+          const crossAnchorKey = cfopHasCrossSplits ? 'cross_4'
+                                : crossRouxLikeTop ? 'cross_3'
+                                : 'cross_3';
+          if (collapseCrossSubBands && k.startsWith('cross_') && k !== crossAnchorKey) return;
+          const cfopHasF2lSplits = r.process === 'cfop'
+                                && Array.isArray(r.f2lSplits)
+                                && r.f2lSplits.length > 0;
+          if (collapseF2lSubBands && k.startsWith('f2l_') && k !== 'f2l_4') return;
+          // For CFOP records WITHOUT r.f2lSplits, the per-sub-band
+          // breakdown is unavailable — phaseMsForDisplay folds the whole
+          // F2L into f2l_4. Show only ONE aggregate "F2L" chit at f2l_4.
+          if (r.process === 'cfop' && !cfopHasF2lSplits
+              && k.startsWith('f2l_') && k !== 'f2l_4') return;
+          let ms: number;
+          if (k.startsWith('cross_') || k.startsWith('f2l_') || k === 'f2l') {
+            // Collapsed aggregate chits: their value sums ALL sub-bands.
+            if (collapseCrossSubBands && k === crossAnchorKey) {
+              ms = chartSlotMs(r, 'cross_1') + chartSlotMs(r, 'cross_2')
+                 + chartSlotMs(r, 'cross_3') + chartSlotMs(r, 'cross_4');
+              label = 'Cross';
+            } else if (collapseF2lSubBands && k === 'f2l_4') {
+              ms = chartSlotMs(r, 'f2l_1') + chartSlotMs(r, 'f2l_2')
+                 + chartSlotMs(r, 'f2l_3') + chartSlotMs(r, 'f2l_4');
+              label = 'F2L';
+            } else {
+              ms = chartSlotMs(r, k);
+              const override = chitLabelFor(r, k);
+              if (override) label = override;
+            }
+          } else {
+            ms = phaseMsForDisplay(r, k);
+          }
           if (ms <= 0) return; // skip 0-duration phases
           valueSec = ms / 1000;
           // Track the topmost (smallest y) phase point — that's where the
@@ -2675,24 +3023,34 @@ function renderGraph() {
       if (r && Number.isFinite(topY)) {
         let totalLabel: string;
         let totalSec: number;
-        if (focusedPhaseGroup === 'f2l') {
-          totalLabel = 'F2L';
-          const allowed = new Set(displayPhaseSequenceFor(r));
+        if (focusedPhaseGroup === 'cross') {
+          totalLabel = 'Cross';
+          const allowed = new Set(chartSlotSequenceFor(r));
           let sumMs = 0;
           for (const k of keyOrder) {
-            const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+            const baseKey = k.startsWith('f2l_') ? 'f2l' : k.startsWith('cross_') ? 'cross' : k;
             if (!allowed.has(baseKey)) continue;
-            sumMs += phaseMsForDisplay(r, k);
+            sumMs += chartSlotMs(r, k);
+          }
+          totalSec = sumMs / 1000;
+        } else if (focusedPhaseGroup === 'f2l') {
+          totalLabel = 'F2L';
+          const allowed = new Set(chartSlotSequenceFor(r));
+          let sumMs = 0;
+          for (const k of keyOrder) {
+            const baseKey = k.startsWith('f2l_') ? 'f2l' : k.startsWith('cross_') ? 'cross' : k;
+            if (!allowed.has(baseKey)) continue;
+            sumMs += chartSlotMs(r, k);
           }
           totalSec = sumMs / 1000;
         } else if (focusedPhaseGroup === 'll') {
           totalLabel = 'LL';
-          const allowed = new Set(displayPhaseSequenceFor(r));
+          const allowed = new Set(chartSlotSequenceFor(r));
           let sumMs = 0;
           for (const k of keyOrder) {
-            const baseKey = k.startsWith('f2l_') ? 'f2l' : k;
+            const baseKey = k.startsWith('f2l_') ? 'f2l' : k.startsWith('cross_') ? 'cross' : k;
             if (!allowed.has(baseKey)) continue;
-            sumMs += phaseMsForDisplay(r, k);
+            sumMs += chartSlotMs(r, k);
           }
           totalSec = sumMs / 1000;
         } else {
@@ -2861,21 +3219,42 @@ function renderGraph() {
         const hasXY = typeof ex === 'number' && typeof ey === 'number';
         const inAxes = hasXY &&
           ex >= ca.left && ex <= ca.right && ey >= ca.top && ey <= ca.bottom;
-        let clickedGroup: 'f2l' | 'll' | null = null;
+        let clickedGroup: typeof focusedPhaseGroup = null;
         if (inAxes) {
           const xScale: any = chart.scales.x;
           const yScale: any = chart.scales.y;
-          const rawX = xScale?.getValueForPixel?.(ex);
           const yValueSec = yScale?.getValueForPixel?.(ey);
-          if (typeof rawX === 'number' && typeof yValueSec === 'number') {
-            const colIdx = Math.max(0, Math.min(slice.length - 1, Math.round(rawX)));
-            const colCum = cumulative[colIdx];
+          // Compute fractional X from pixel position. Chart.js's
+          // CategoryScale.getValueForPixel does Math.round() internally,
+          // so it can't tell us where between columns the click landed —
+          // we have to do it ourselves, otherwise interpolation collapses
+          // and the hit target uses the (often very different) data of
+          // whichever column was nearest.
+          const maxIdx = slice.length - 1;
+          let fracX = NaN;
+          if (typeof xScale?.getPixelForValue === 'function' && maxIdx >= 0) {
+            const pxLeft = xScale.getPixelForValue(0);
+            const pxRight = xScale.getPixelForValue(maxIdx);
+            const span = pxRight - pxLeft;
+            fracX = span > 0 ? (ex - pxLeft) / span * maxIdx : 0;
+          }
+          if (typeof yValueSec === 'number' && Number.isFinite(fracX)) {
+            const xClamped = Math.max(0, Math.min(maxIdx, fracX));
+            const left = Math.floor(xClamped);
+            const right = Math.min(maxIdx, left + 1);
+            const t = xClamped - left;
+            const colCum = cumulative[left].map((v, i) =>
+              v + (cumulative[right][i] - v) * t,
+            );
+            const yLower = yScale?.getValueForPixel?.(ey + 2) ?? yValueSec;
+            const tolerance = Math.max(0, yValueSec - yLower);
+            const hitY = yValueSec - tolerance;
             let hitKey: string | null = null;
             for (let i = 0; i < colCum.length; i++) {
-              if (yValueSec <= colCum[i]) { hitKey = keyOrder[i]; break; }
+              if (hitY <= colCum[i]) { hitKey = keyOrder[i]; break; }
             }
             const grp = hitKey ? groupOfKey(hitKey) : null;
-            if (grp === 'f2l' || grp === 'll') clickedGroup = grp;
+            if (grp === 'cross' || grp === 'f2l' || grp === 'll') clickedGroup = grp;
           }
         }
         // Toggle if clicking the currently-focused group; otherwise set
@@ -2885,7 +3264,13 @@ function renderGraph() {
           : clickedGroup;
         if (focusedPhaseGroup !== next) {
           focusedPhaseGroup = next;
-          renderGraph();
+          // Defer the re-render to the next frame so the chart's current
+          // event-dispatch cycle finishes first. Re-rendering synchronously
+          // mid-cycle leaves the previous chart's canvas state half-drawn
+          // (e.g., stale dataset line strokes that only get cleared on the
+          // next interaction). The frame deferral lets the old chart settle
+          // before destroy + reconstruct.
+          requestAnimationFrame(() => renderGraph());
         }
       },
       onHover: (e, elements, chart) => {
@@ -2936,21 +3321,39 @@ function renderGraph() {
         if (isLeave || !inAxes) {
           if (cv) cv.style.cursor = '';
         } else {
-          // Same band-detection logic as the click handler.
-          let hoverGroup: 'f2l' | 'll' | null = null;
+          // Same band-detection logic as the click handler (must use
+          // pixel-derived fractional X — Chart.js's category-scale
+          // getValueForPixel rounds to integer, so it can't tell us
+          // where between columns the click is).
+          let hoverGroup: typeof focusedPhaseGroup = null;
           const xScale: any = chart.scales.x;
           const yScale: any = chart.scales.y;
-          const rawX = xScale?.getValueForPixel?.(ex);
           const yValueSec = yScale?.getValueForPixel?.(ey);
-          if (typeof rawX === 'number' && typeof yValueSec === 'number') {
-            const colIdx = Math.max(0, Math.min(slice.length - 1, Math.round(rawX)));
-            const colCum = cumulative[colIdx];
+          const maxIdx = slice.length - 1;
+          let fracX = NaN;
+          if (typeof xScale?.getPixelForValue === 'function' && maxIdx >= 0) {
+            const pxLeft = xScale.getPixelForValue(0);
+            const pxRight = xScale.getPixelForValue(maxIdx);
+            const span = pxRight - pxLeft;
+            fracX = span > 0 ? (ex - pxLeft) / span * maxIdx : 0;
+          }
+          if (typeof yValueSec === 'number' && Number.isFinite(fracX)) {
+            const xClamped = Math.max(0, Math.min(maxIdx, fracX));
+            const left = Math.floor(xClamped);
+            const right = Math.min(maxIdx, left + 1);
+            const t = xClamped - left;
+            const colCum = cumulative[left].map((v, i) =>
+              v + (cumulative[right][i] - v) * t,
+            );
+            const yLower = yScale?.getValueForPixel?.(ey + 2) ?? yValueSec;
+            const tolerance = Math.max(0, yValueSec - yLower);
+            const hitY = yValueSec - tolerance;
             let hitKey: string | null = null;
             for (let i = 0; i < colCum.length; i++) {
-              if (yValueSec <= colCum[i]) { hitKey = keyOrder[i]; break; }
+              if (hitY <= colCum[i]) { hitKey = keyOrder[i]; break; }
             }
             const grp = hitKey ? groupOfKey(hitKey) : null;
-            if (grp === 'f2l' || grp === 'll') hoverGroup = grp;
+            if (grp === 'cross' || grp === 'f2l' || grp === 'll') hoverGroup = grp;
           }
           if (cv) cv.style.cursor = hoverGroup ? 'pointer' : '';
         }
@@ -3123,30 +3526,25 @@ function renderSolutionView(target: HTMLElement, moves: string[], showStrikes: b
 // pauses read as flat sections and bursts as steep slope. No metrics or
 // labels are overlaid — the slope itself encodes pace.
 
-// Canonical phase order for a stored solve, used by the phase color bands
-// behind the line. Follows the current 2-look display toggles so the
-// popup's banding matches the main graph: when the user has 2-look OLL
-// on AND the record has the split fields, render eoll + ocll; otherwise
-// fold to a single oll band. Same for PLL. phaseMsForDisplay handles the
-// underlying ms aggregation either way.
-function phaseOrderForRecord(r: SolveRecord): string[] {
-  if (r.process === 'beginner') return ['setup', 'll'];
-  const out: string[] = ['cross', 'f2l'];
-  const hasOllSplit = typeof r.phases?.eoll === 'number' && typeof r.phases?.ocll === 'number';
-  const hasOllAny = hasOllSplit || typeof r.phases?.oll === 'number';
-  if (prefs.twoLookOll && hasOllSplit) out.push('eoll', 'ocll');
-  else if (hasOllAny) out.push('oll');
-  const hasPllSplit = typeof r.phases?.cpll === 'number' && typeof r.phases?.epll === 'number';
-  const hasPllAny = hasPllSplit || typeof r.phases?.pll === 'number';
-  if (prefs.twoLookPll && hasPllSplit) out.push('cpll', 'epll');
-  else if (hasPllAny) out.push('pll');
-  return out;
-}
-
 // Color per phase key. Mirrors the choices made in currentPhaseSequence()
 // — notably aggregate OLL uses OCLL's color (orange) so it matches the
 // top of the EOLL+OCLL stack when the toggle is on.
+// Cross sub-band alphas — pink-on-pink gradient mirroring F2L_SUB_ALPHAS.
+// cross_1 = lightest (also serves as Roux/F3uL "1st pair" shade);
+// cross_3 = current PHASE_COLORS[0] saturation (current "white cross"
+// shade, also serves as Roux/F3uL "1st block done"); cross_4 = the new
+// darkest pink, representing "full cross" once cross sub-phase tracking
+// lands.
+const CROSS_SUB_ALPHAS = [0.30, 0.45, 0.60, 0.75];
+const crossShadeFor = (n: number): string =>
+  PHASE_COLORS[0].replace(/,\s*[\d.]+\)\s*$/, `, ${CROSS_SUB_ALPHAS[n - 1] ?? 0.6})`);
+
 const PHASE_COLOR_BY_KEY: Record<string, string> = {
+  // Unified chart slot keys (multi-solve graph).
+  cross_1: crossShadeFor(1),
+  cross_2: crossShadeFor(2),
+  cross_3: crossShadeFor(3),
+  cross_4: crossShadeFor(4),
   cross: PHASE_COLORS[0],
   f2l:   PHASE_COLORS[1],
   eoll:  PHASE_COLORS[2],
@@ -3157,20 +3555,16 @@ const PHASE_COLOR_BY_KEY: Record<string, string> = {
   pll:   PHASE_COLORS[5],
   setup: PHASE_COLORS[0],
   ll:    PHASE_COLORS[4],
-  // Roux / F3uL
+  // Roux / F3uL legacy keys (single-solve popup still uses these via
+  // displayPhaseSequenceFor). The MULTI-solve chart uses unified
+  // cross_1..cross_4 / f2l_1..f2l_4 slots — see chartSlotMs.
   f1b:   PHASE_COLORS[0],
-  f2b:   PHASE_COLORS[7],   // green-light — 2nd F2L sub-band shade
-  fml:   PHASE_COLORS[1],   // same green as F2L — F3uL's FML lands in F2L-done state
-  // Block-stage shades. Scheme 1 = b1_pre → b1_done → b2_pre → b2_done.
-  // Scheme 2 = rp1 → rp2 → rp3 → rp4. Same colors slot-for-slot:
-  // light pink → cross-pink → light green → medium green. 1st-block
-  // shades are pink so Roux/F3uL's first stage visually parallels
-  // CFOP's cross. F3uL adds FML (dark green) on top; Roux records end
-  // at medium green per "darker for 2nd block done, darkest for FML".
-  b1_pre:   PHASE_COLORS[8],   // light pink
-  b1_done:  PHASE_COLORS[0],   // cross pink (intentional reuse of CFOP cross color)
-  b2_pre:   PHASE_COLORS[9],   // light green
-  b2_done:  PHASE_COLORS[7],   // medium green (= existing F2B color)
+  f2b:   PHASE_COLORS[7],
+  fml:   PHASE_COLORS[1],
+  b1_pre:   PHASE_COLORS[8],
+  b1_done:  PHASE_COLORS[0],
+  b2_pre:   PHASE_COLORS[9],
+  b2_done:  PHASE_COLORS[7],
   rp1:      PHASE_COLORS[8],
   rp2:      PHASE_COLORS[0],
   rp3:      PHASE_COLORS[9],
@@ -3247,7 +3641,7 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
   // splits toggle is on and the record has f2lSplits, the F2L band is
   // subdivided into up to 4 alpha-scaled sub-bands matching the main
   // graph's visual decomposition.
-  const order = phaseOrderForRecord(r);
+  const order = displayPhaseSequenceFor(r);
   const splitF2l = prefs.f2lSplits && Array.isArray(r.f2lSplits) && r.f2lSplits.length > 0;
   let acc = 0;
   const bands: { start: number; end: number; color: string }[] = [];
@@ -3375,27 +3769,37 @@ function renderSolveList() {
     const originalIndex = history.length - idx; // 1-based
     const realIdx = history.length - 1 - idx;
     const row = document.createElement('div');
-    row.className = 'px-2 py-1 flex items-center gap-2 text-xs sm:text-sm';
+    row.className = 'relative px-2 py-1 flex items-center gap-2 text-xs sm:text-sm';
     row.dataset.solveIdx = String(realIdx);
 
     // Power-user-only recompute affordance — revealed by holding
     // option/alt (CSS rule .fs-alt-only). Replays this solve's
     // scramble + solution to re-derive rouxPairTimingsMs etc. Only
     // applicable to Roux/F3uL records with per-turn timing data;
-    // omitted entirely otherwise to keep the row tidy.
-    //
-    // The actual click handler is installed once at the document
-    // level (see initFullSolve → handleRecomputeClick) with capture
-    // phase. That lets the click reach us even if any overlay sits
-    // on top of the row with pointer-events:auto, AND it survives
-    // the row being re-rendered (the button DOM nodes come and go,
-    // but the document listener is permanent).
+    // omitted entirely otherwise to keep the row tidy. Absolutely
+    // positioned over the empty space to the left of the (right-
+    // aligned) solve index, so revealing it doesn't shift the row.
     if ((r.process === 'roux' || r.process === 'f3ul') && r.turns && r.turns.length > 0) {
       const recompute = document.createElement('button');
-      recompute.className = 'fs-recompute-btn fs-alt-only relative z-50 leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
-      recompute.dataset.realIdx = String(realIdx);
+      recompute.className = 'fs-alt-only absolute left-1 top-1/2 -translate-y-1/2 leading-none text-sm px-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600';
       recompute.textContent = '🔄';
       recompute.title = 'Recompute pair timings for this solve (option/alt-held)';
+      recompute.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const changed = recomputeRouxPairTimingsFor(history[realIdx]);
+        if (changed) {
+          recompute.textContent = '✅';
+          saveHistory();
+          // Defer the re-render so the ✅ stays visible briefly —
+          // renderAllFilterDependent() rebuilds the row and the new
+          // button starts as the default 🔄.
+          setTimeout(() => { renderAllFilterDependent(); }, 600);
+        } else {
+          recompute.textContent = '⚠️';
+          recompute.title = 'No change — this solve may lack per-turn timing data.';
+          setTimeout(() => { recompute.textContent = '🔄'; }, 900);
+        }
+      });
       row.appendChild(recompute);
     }
 
@@ -3463,14 +3867,14 @@ function renderSolveList() {
     actions.appendChild(turnGraphBtn);
 
     const copyBtn = document.createElement('button');
-    copyBtn.className = iconBtnClass;
-    copyBtn.textContent = '📋';
+    copyBtn.className = `${iconBtnClass} text-base`;
+    copyBtn.textContent = COPY_ICON;
     copyBtn.title = 'Copy scramble';
     copyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       void navigator.clipboard?.writeText(r.scramble).then(() => {
         copyBtn.textContent = '✅';
-        setTimeout(() => { copyBtn.textContent = '📋'; }, 900);
+        setTimeout(() => { copyBtn.textContent = COPY_ICON; }, 900);
       });
     });
     actions.appendChild(copyBtn);
@@ -4398,100 +4802,16 @@ export function initFullSolve() {
     renderStatsLegend();
   }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
 
-  // Capture-phase document listener for the per-row "recompute pair
-  // timings" button. Lives at the document level so it fires BEFORE
-  // any other handler — including any pointer-events:auto overlay
-  // that might be sitting on top of the row — and survives the row
-  // being re-rendered (we only install this once at init). Uses both
-  // pointerdown and click for paranoia: pointerdown for the case
-  // where the user releases option between press and release (so the
-  // button hides before click fires), click as a fallback if the
-  // browser doesn't deliver pointerdown for some reason.
-  const handleRecomputeClick = (e: Event) => {
-    const t = e.target as HTMLElement | null;
-    // First search via closest() (button itself or ancestor). Fall
-    // back to elementsFromPoint at the click coords, since an overlay
-    // can deliver the event to itself rather than the button beneath.
-    let btn = t?.closest?.('.fs-recompute-btn') as HTMLButtonElement | null;
-    if (!btn && (e as PointerEvent).clientX !== undefined) {
-      const ev = e as PointerEvent;
-      const stack = document.elementsFromPoint(ev.clientX, ev.clientY);
-      for (const el of stack) {
-        if ((el as HTMLElement).classList?.contains('fs-recompute-btn')) {
-          btn = el as HTMLButtonElement;
-          break;
-        }
-      }
-    }
-    console.log('[fs-recompute]', e.type, 'target=', t?.tagName, t?.className,
-                'matched=', !!btn);
-    if (!btn) return;
-    e.stopPropagation();
-    e.preventDefault();
-    const realIdx = parseInt(btn.dataset.realIdx ?? '-1', 10);
-    if (realIdx < 0 || realIdx >= history.length) return;
-    const changed = recomputeRouxPairTimingsFor(history[realIdx]);
-    console.log('[fs-recompute] result:', { changed, realIdx,
-      rouxPairTimingsMs: history[realIdx].rouxPairTimingsMs });
-    if (changed) {
-      btn.textContent = '✅';
-      saveHistory();
-      renderAllFilterDependent();
-    } else {
-      btn.textContent = '⚠️';
-      btn.title = 'No change — this solve may lack per-turn timing data.';
-    }
-    setTimeout(() => { btn.textContent = '🔄'; }, 900);
-  };
-  document.addEventListener('pointerdown', handleRecomputeClick, { capture: true });
-  document.addEventListener('click', handleRecomputeClick, { capture: true });
-
-  // Window-level diagnostic for opt-click failures: from the dev
-  // console run `__fsRecomputeLatest()` to replay-recompute the most
-  // recent Roux/F3uL solve, bypassing all UI plumbing. Logs the
-  // before/after pair-timings so you can see whether the issue is in
-  // the recompute function or in the click chain.
-  (window as unknown as { __fsRecomputeLatest?: () => void }).__fsRecomputeLatest = () => {
-    for (let i = history.length - 1; i >= 0; i--) {
-      const r = history[i];
-      if (r.process !== 'roux' && r.process !== 'f3ul') continue;
-      console.log('[fs-recompute] before:', JSON.parse(JSON.stringify({
-        process: r.process,
-        rouxPairTimingsMs: r.rouxPairTimingsMs,
-        rouxBlock1FirstPairMs: r.rouxBlock1FirstPairMs,
-        rouxBlock2FirstPairMs: r.rouxBlock2FirstPairMs,
-      })));
-      const changed = recomputeRouxPairTimingsFor(r);
-      console.log('[fs-recompute] after:', { changed,
-        rouxPairTimingsMs: r.rouxPairTimingsMs,
-        rouxBlock1FirstPairMs: r.rouxBlock1FirstPairMs,
-        rouxBlock2FirstPairMs: r.rouxBlock2FirstPairMs });
-      if (changed) {
-        saveHistory();
-        renderAllFilterDependent();
-      }
-      return;
-    }
-    console.warn('[fs-recompute] no Roux/F3uL records in history');
-  };
-
   // Global option/alt-key tracking. Adds `fs-alt-down` to <body> while
   // the key is held; CSS rules in tailwind.css reveal `.fs-alt-only`
   // affordances (currently: the per-row pair-timing recompute icon).
-  // Uses getModifierState which reflects the up-to-the-moment alt
-  // state on both keydown and keyup of EVERY key — more reliable than
-  // checking e.altKey, which on some browsers is briefly out of sync
-  // on the keydown of Alt itself.
+  // Clears on blur / tab hide so we don't get stuck visible after the
+  // user alt-tabs away.
   const setAltState = (down: boolean) => {
     document.body.classList.toggle('fs-alt-down', down);
   };
-  const readAltFromEvent = (e: KeyboardEvent) =>
-    setAltState(!!(e.getModifierState?.('Alt') ?? e.altKey)
-                || e.key === 'Alt' && e.type === 'keydown');
-  document.addEventListener('keydown', readAltFromEvent);
-  document.addEventListener('keyup', readAltFromEvent);
-  // Belt + suspenders: clear on any state change that could leave us
-  // stuck with the class on but no key pressed.
+  document.addEventListener('keydown', (e) => { if (e.altKey) setAltState(true); });
+  document.addEventListener('keyup', (e) => { if (!e.altKey) setAltState(false); });
   window.addEventListener('blur', () => setAltState(false));
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) setAltState(false);
@@ -4562,8 +4882,14 @@ export function fsOnPattern(pattern: KPattern) {
   }
 }
 
+export function fsSetConnectStatus(s: { text: string; error: boolean } | null) {
+  connectStatus = s;
+  updateCubeGate();
+}
+
 export function fsSetCubeConnected(connected: boolean) {
   cubeConnected = connected;
+  if (connected) connectStatus = null;
   updateCubeGate();
   if (connected && prefs.enabled && mode === 'idle') {
     // Cube just connected — kick off a scramble to solve.
