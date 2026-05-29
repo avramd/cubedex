@@ -179,17 +179,17 @@ describe('tagFilterLabel', () => {
 
   it('shows include-only', () => {
     expect(tagFilterLabel({ include: ['speed', 'oll'], exclude: [] }))
-      .toBe('include: speed, oll');
+      .toBe('+speed, oll');
   });
 
   it('shows exclude-only', () => {
     expect(tagFilterLabel({ include: [], exclude: ['paused'] }))
-      .toBe('exclude: paused');
+      .toBe('-paused');
   });
 
   it('shows both with a pipe separator', () => {
     expect(tagFilterLabel({ include: ['speed'], exclude: ['paused'] }))
-      .toBe('include: speed | exclude: paused');
+      .toBe('+speed | -paused');
   });
 });
 

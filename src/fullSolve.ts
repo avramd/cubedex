@@ -4,6 +4,7 @@ import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
 import { COPY_ICON } from './icons';
+import { startReplay } from './replay';
 import { type Face, FACES, OPPOSITE, faceStickers, isSolved } from './cube/facelets';
 import {
   isCrossDoneOn, isF2LDoneOn, isEOLLDoneOn, isOllDoneOn, isHeadlightsDoneOn,
@@ -791,7 +792,7 @@ function isLreDone(facelets: string): boolean {
 // so the two 2-look pairs sit adjacent on the colour wheel:
 //   2-look OLL:  yellow (EOLL) → orange (OCLL)
 //   2-look PLL:  blue (CPLL)   → purple (EPLL)
-const PHASE_COLORS = [
+export const PHASE_COLORS = [
   'rgba(236, 72, 153, 0.6)',   // 0  pink   — cross / F1B
   // F2L runs at alpha 0.75 so the unsplit / no-data band reads at the
   // same saturation as the topmost sub-band when the F2L-slots toggle is
@@ -1182,6 +1183,7 @@ const fsExportHistoryCsvBtnEl = () => $$<HTMLButtonElement>('fs-export-history-c
 const fsImportHistoryBtnEl = () => $$<HTMLButtonElement>('fs-import-history');
 const fsImportHistoryInputEl = () => $$<HTMLInputElement>('fs-import-history-input');
 const fsPendingTagsBtnEl = () => $$<HTMLButtonElement>('fs-pending-tags-btn');
+const fsReplayScrambleBtnEl = () => $$<HTMLButtonElement>('fs-replay-scramble-btn');
 const fsPendingTagsDisplayEl = () => $$('fs-pending-tags-display');
 const fsTagsFilterMenuEl = () => $$<HTMLSelectElement>('fs-tags-filter-menu');
 const fsRouxSchemeEl = () => $$<HTMLSelectElement>('fs-roux-scheme');
@@ -1636,6 +1638,25 @@ function updateCfopOptionsVisibility() {
 
 // ---------- Scramble display ----------
 
+// Enable / disable the 📽 replay button next to the scramble row's
+// pending-tags button. Replays the most-recently-completed solve in
+// history. Disabled while the user is mid-flow on the cube (scrambling,
+// inspecting, solving); active when idle (post-solve) and when paused.
+// Also disabled when there's nothing to replay yet.
+function renderReplayScrambleBtn() {
+  const btn = fsReplayScrambleBtnEl();
+  if (!btn) return;
+  const last = history.length > 0 ? history[history.length - 1] : null;
+  const hasSolution = !!last && !!last.solution && last.solution.trim().length > 0;
+  const allowedByMode = mode === 'idle' || mode === 'paused';
+  btn.disabled = !hasSolution || !allowedByMode;
+  btn.title = !hasSolution
+    ? 'No solve to replay yet.'
+    : !allowedByMode
+      ? 'Replay available after this solve.'
+      : 'Replay the most recent solve.';
+}
+
 function renderScrambleDisplay() {
   const el = fsScrambleEl();
   if (!el) return;
@@ -1895,6 +1916,7 @@ async function newScramble() {
   const abortBtn = fsAbortBtnEl();
   if (abortBtn) abortBtn.disabled = true;
   renderScrambleDisplay();
+  renderReplayScrambleBtn();
   const startFacelets = patternToFacelets(start);
   if (!isSolved(startFacelets)) {
     renderStatus('Cube is not solved — scramble starts from current state. For a fair scramble, solve your cube first.');
@@ -2045,6 +2067,7 @@ function resolveScrambleProgressFromPattern(facelets: string) {
         onScrambleComplete();
       }
       renderScrambleDisplay();
+      renderReplayScrambleBtn();
       return;
     }
   }
@@ -2057,11 +2080,13 @@ function resolveScrambleProgressFromPattern(facelets: string) {
     halfwayActive = true;
     deviationMoves = [];
     renderScrambleDisplay();
+    renderReplayScrambleBtn();
     return;
   }
   // No match: deviation persists. (deviationMoves is managed in onScrambleMove.)
   halfwayActive = false;
   renderScrambleDisplay();
+  renderReplayScrambleBtn();
 }
 
 // ---------- Inspection / solve flow ----------
@@ -2378,6 +2403,7 @@ function finishSolve() {
   renderStatsBoxes();
   renderStatsLegend();
   renderSolveList();
+  renderReplayScrambleBtn();
 }
 
 // ---------- Pause / resume ----------
@@ -2408,6 +2434,7 @@ function togglePause() {
     const pauseBtn = fsPauseBtnEl();
     if (pauseBtn) pauseBtn.textContent = 'Resume';
     renderStatus('Paused — click any move to plan a rewind.');
+    renderReplayScrambleBtn();
   } else if (mode === 'paused') {
     pausedAccumMs += Date.now() - pauseStartedAtMs;
     pauseStartedAtMs = 0;
@@ -2435,6 +2462,7 @@ function togglePause() {
     if (phaseTimestamps.length > 0 && phaseTimestamps[phaseTimestamps.length - 1] !== null) {
       finishSolve();
     }
+    renderReplayScrambleBtn();
   }
 }
 
@@ -3587,7 +3615,7 @@ const CROSS_SUB_ALPHAS = [0.30, 0.45, 0.60, 0.75];
 const crossShadeFor = (n: number): string =>
   PHASE_COLORS[0].replace(/,\s*[\d.]+\)\s*$/, `, ${CROSS_SUB_ALPHAS[n - 1] ?? 0.6})`);
 
-const PHASE_COLOR_BY_KEY: Record<string, string> = {
+export const PHASE_COLOR_BY_KEY: Record<string, string> = {
   // Unified chart slot keys (multi-solve graph).
   cross_1: crossShadeFor(1),
   cross_2: crossShadeFor(2),
@@ -3914,6 +3942,21 @@ function renderSolveList() {
     });
     actions.appendChild(turnGraphBtn);
 
+    // 📽 opens the solve-replay overlay for this solve. Disabled when
+    // the record lacks a solution (e.g., aborted before any move) —
+    // there's nothing to replay.
+    const replayBtn = document.createElement('button');
+    replayBtn.className = iconBtnClass;
+    replayBtn.textContent = '📽';
+    const hasSolution = !!r.solution && r.solution.trim().length > 0;
+    replayBtn.title = hasSolution ? 'Replay this solve' : 'No solution recorded';
+    replayBtn.disabled = !hasSolution;
+    replayBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      startReplay(r);
+    });
+    actions.appendChild(replayBtn);
+
     const copyBtn = document.createElement('button');
     copyBtn.className = `${iconBtnClass} text-base`;
     copyBtn.textContent = COPY_ICON;
@@ -4184,6 +4227,12 @@ function wireEvents() {
 
   fsPendingTagsBtnEl()?.addEventListener('click', () => {
     void openPendingTagsEditor();
+  });
+
+  fsReplayScrambleBtnEl()?.addEventListener('click', () => {
+    const last = history.length > 0 ? history[history.length - 1] : null;
+    if (!last || !last.solution) return;
+    startReplay(last);
   });
 
   fsTagsFilterMenuEl()?.addEventListener('change', () => {

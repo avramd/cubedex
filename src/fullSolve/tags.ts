@@ -139,7 +139,7 @@ export function tagFilterLabel(filter: TagFilter): string {
   const exc = filter.exclude;
   if (inc.length === 0 && exc.length === 0) return 'All Solves';
   const parts: string[] = [];
-  if (inc.length > 0) parts.push(`include: ${inc.join(', ')}`);
-  if (exc.length > 0) parts.push(`exclude: ${exc.join(', ')}`);
+  if (inc.length > 0) parts.push(`+${inc.join(', ')}`);
+  if (exc.length > 0) parts.push(`-${exc.join(', ')}`);
   return parts.join(' | ');
 }

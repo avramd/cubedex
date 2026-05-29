@@ -29,6 +29,9 @@ import { faceletsToPattern, patternToFacelets } from './utils';
 import { COPY_ICON } from './icons';
 import {
   initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, fsSetConnectStatus, isFullSolveModeEnabled,
+} from './fullSolve';
+import { initReplay, isReplayActive } from './replay';
+import {
   setOnLocalScrambleChange, setOnShareStateChange, isSharingScrambles,
   setPeerSharingScrambles, applyRemoteFsScramble, setShareScramblesNetVisible,
   getCurrentFsScramble,
@@ -73,6 +76,17 @@ const containerEl = document.getElementById('container') as HTMLElement | null;
 const cubeCellEl = document.getElementById('cube') as HTMLElement | null;
 
 $('#cube').append(twistyPlayer);
+
+// Track the last alg string we set on twistyPlayer — its `.alg` is a
+// write-only setter (the getter throws), and `experimentalModel.alg`
+// resolves asynchronously, but the replay overlay needs a synchronous
+// snapshot to restore on close. Every assignment to `twistyPlayer.alg`
+// goes through setTwistyAlg() so this stays in sync.
+let lastTwistyAlg = '';
+function setTwistyAlg(alg: string): void {
+  lastTwistyAlg = alg;
+  twistyPlayer.alg = alg;
+}
 
 // Arcball drag: Points inside the unit circle map to the front hemisphere;
 // outside maps to the rim (giving roll when dragging at the edges).
@@ -377,7 +391,11 @@ async function amimateCubeOrientation() {
       if (forceFix) forceFix = false;
     }
 
-    if (gyroscopeEnabled) {
+    // During replay, ignore live gyro orientation — the smartcube isn't
+    // controlling what's on screen, and we want the user's arc-ball
+    // drag to actually reorient the playback view instead of getting
+    // immediately overwritten by the next gyro frame.
+    if (gyroscopeEnabled && !isReplayActive()) {
       twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
     } else {
       twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
@@ -1056,7 +1074,7 @@ function drawAlgInCube() {
     scrambleToAlg = [];
   }
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = Alg.fromString(userAlg.join(' ')).invert().toString();
+  setTwistyAlg(Alg.fromString(userAlg.join(' ')).invert().toString());
 }
 
 var showMistakesTimeout: NodeJS.Timeout;
@@ -1382,6 +1400,13 @@ async function handleMoveEvent(event: SmartCubeEvent) {
 async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slicePairedFirst?: SmartCubeEvent) {
   if (event.type === "MOVE") {
     const logicalMove = event.move;
+
+    // Replay overrides the cube display: while a stored solve is being
+    // played back, live smartcube events must NOT animate the visual
+    // cube, advance the tracker, or feed Full Solve. The event is
+    // dropped — the user's physical moves will resume affecting things
+    // as soon as they close replay.
+    if (isReplayActive()) return;
 
     if (visualMove) {
       updateSliceOrientation(visualMove);
@@ -1710,7 +1735,7 @@ function handleFaceletsEvent(event: SmartCubeEvent) {
     }
     twistyTracker.alg = setupAlg;
     if (userAlg.length === 0) {
-      twistyPlayer.alg = setupAlg;
+      setTwistyAlg(setupAlg);
     }
     applyWhiteOnBottomState({ persist: false });
     cubeStateInitialized = true;
@@ -1727,7 +1752,7 @@ function handleFaceletsEvent(event: SmartCubeEvent) {
       setupAlg = solution ? solution.invert().toString() : '';
     }
     twistyTracker.alg = setupAlg;
-    twistyPlayer.alg = setupAlg;
+    setTwistyAlg(setupAlg);
     appliedPhysicalMoves = [];
     applyWhiteOnBottomState({ persist: false });
     resyncFromNextFacelets = false;
@@ -1826,7 +1851,7 @@ $('#alg-display').on('click', () => {
 $('#input-alg').on('click', () => {
   twistyPlayer.experimentalStickering = 'full';
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = '';
+  setTwistyAlg('');
   resetAlg();
   $('#alg-input').val('');
   inputMode = true;
@@ -1878,7 +1903,7 @@ $('#device-info').on('click', () => {
 $('#reset-state').on('click', async () => {
   await conn?.sendCommand({ type: "REQUEST_RESET" });
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = '';
+  setTwistyAlg('');
   twistyTracker.alg = '';
   drawAlgInCube();
 });
@@ -1913,7 +1938,7 @@ function deviceDisconnected() {
   if (netPeer.connected) netPeer.send({ type: 'cube-connected', connected: false });
   cubeStateInitialized = false;
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = '';
+  setTwistyAlg('');
   twistyTracker.alg = '';
   fsSetCubeConnected(false);
   releaseWakeLock();
@@ -2191,6 +2216,10 @@ var myKpattern: KPattern;
 var initialstate: KPattern;
 
 twistyTracker.experimentalModel.currentPattern.addFreshListener(async (kpattern) => {
+  // Replay drives twistyPlayer (the visible cube), not twistyTracker
+  // (the live-event tracker), so this listener firing during replay
+  // means a stale smartcube event slipped through; ignore it.
+  if (isReplayActive()) return;
   myKpattern = kpattern;
   if (patternStates.length > 0 && currentMoveIndex === 0 && myKpattern.isIdentical(initialstate)) {
     console.log("Returning to initial state")
@@ -2401,7 +2430,7 @@ $('#scramble-to').on('click', () => {
       // No short path from current state; reset tracker to solved so invAlg is the scramble
       appliedPhysicalMoves = [];
       twistyTracker.alg = '';
-      twistyPlayer.alg = '';  // sync synchronously to avoid a late async override
+      setTwistyAlg(''); // sync synchronously to avoid a late async override
       trackerReset = true;
       cubePattern = await twistyTracker.experimentalModel.currentPattern.get();
       scramble = inverseAlg.experimentalSimplify({ cancel: true, puzzleLoader: cube3x3x3 }).toString().trim();
@@ -2497,7 +2526,7 @@ $('#category-select').on('change', () => {
   $('#select-all-subsets-toggle').prop('checked', false);
   // reset cube alg
   appliedPhysicalMoves = [];
-  twistyPlayer.alg = '';
+  setTwistyAlg('');
   // selecting a new category should reset the current practice drill
   resetDrill();
 });
@@ -2763,7 +2792,7 @@ function applyWhiteOnBottomState(options?: { persist?: boolean }) {
   twistyPlayer.experimentalSetupAlg = whiteOnBottomEnabled ? 'z2' : '';
   if (conn) {
     void twistyTracker.experimentalGet.alg().then((alg) => {
-      twistyPlayer.alg = alg.toString();
+      setTwistyAlg(alg.toString());
     }).catch((err) => console.warn('twisty alg sync failed', err));
   }
 }
@@ -3291,6 +3320,26 @@ $("#cube").on('touchend', () => {
 });
 
 initFullSolve();
+// Wire the solve-replay overlay: the replay module needs to set the
+// virtual cube's algorithm and save/restore its pre-replay state. We
+// inject those via callbacks so replay.ts doesn't need to know about
+// twistyPlayer directly.
+initReplay({
+  setCubeAlg: (alg) => { setTwistyAlg(alg); },
+  applyMove: (move) => {
+    // Animated single-move advance — TwistyPlayer queues consecutive
+    // calls and animates at its tempoScale. Used for play + step-
+    // forward; instant jumps (scrub, rewind, step-back) go through
+    // setCubeAlg instead.
+    twistyPlayer.experimentalAddMove(move, { cancel: false });
+  },
+  saveCurrentAlg: () => lastTwistyAlg,
+  // Tracks the Animation Speed slider (settings panel + quick-settings).
+  // Base ~150ms per move at speed=1; scales inversely with speed so
+  // moving the slider to 0.5 doubles the per-move duration replay uses
+  // to schedule its "end-at-recorded-time" delays.
+  getAnimMsPerMove: () => Math.max(20, 150 / Math.max(0.05, currentAnimSpeed)),
+});
 // Seed the Full Solve module's pattern state eagerly so it doesn't have to
 // wait for the next pattern-change event (addFreshListener fires on changes,
 // not on subscribe). Without this, newScramble's start state can default to
