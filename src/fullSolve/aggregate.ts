@@ -110,12 +110,37 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
       const anchor = Math.max(f1b, r.rouxBlock2FirstPairMs ?? 0);
       return Math.max(0, (f1b + f2b) - anchor);
     }
-    // Scheme 2: chronological pair count. Anchor for rp4 is the
-    // sum of f1b + f2b (= 2nd block done = 4 pairs done by definition).
-    case 'rp1': return r.rouxPairTimingsMs?.[0] ?? 0;
-    case 'rp2': return Math.max(0, (r.rouxPairTimingsMs?.[1] ?? 0) - (r.rouxPairTimingsMs?.[0] ?? 0));
-    case 'rp3': return Math.max(0, (r.rouxPairTimingsMs?.[2] ?? 0) - (r.rouxPairTimingsMs?.[1] ?? 0));
-    case 'rp4': return Math.max(0, ((p.f1b ?? 0) + (p.f2b ?? 0)) - (r.rouxPairTimingsMs?.[2] ?? 0));
+    // Scheme 2: chronological pair count. Sums clamped to live-tracker
+    // boundaries so the chart total agrees with totalMs even when the
+    // replay's pair timestamps disagree with f1b/f2b — common when a
+    // D-move during LL phase transiently makes a D-slot match, firing
+    // a late pair-detection event the live tracker never saw. Same
+    // shape as block-aware's b1/b2 clamping:
+    //   rp1 + rp2 === f1b
+    //   rp3 + rp4 === f2b
+    // For ordinary records (rp[1] ≈ f1b, rp[3] ≈ f1b+f2b) the clamps
+    // are no-ops; they only kick in when the replay's anchors fall
+    // outside the live-tracker window.
+    case 'rp1': {
+      const f1b = p.f1b ?? 0;
+      return Math.min(f1b, Math.max(0, r.rouxPairTimingsMs?.[0] ?? 0));
+    }
+    case 'rp2': {
+      const f1b = p.f1b ?? 0;
+      const rp1 = Math.min(f1b, Math.max(0, r.rouxPairTimingsMs?.[0] ?? 0));
+      return Math.max(0, f1b - rp1);
+    }
+    case 'rp3': {
+      const f1b = p.f1b ?? 0;
+      const f2b = p.f2b ?? 0;
+      return Math.min(f2b, Math.max(0, (r.rouxPairTimingsMs?.[2] ?? 0) - f1b));
+    }
+    case 'rp4': {
+      const f1b = p.f1b ?? 0;
+      const f2b = p.f2b ?? 0;
+      const rp3 = Math.min(f2b, Math.max(0, (r.rouxPairTimingsMs?.[2] ?? 0) - f1b));
+      return Math.max(0, f2b - rp3);
+    }
     default:     return p[displayKey] ?? 0;
   }
 }
