@@ -561,9 +561,13 @@ function recomputeRouxPairTimingsFor(r: SolveRecord): boolean {
       }
     }
     // Block-done events: capture earliest pair for each block by
-    // side-face membership in the slot's sticker tuple.
+    // side-face membership in the slot's sticker tuple. Only lock the
+    // "Seen" flag once we actually MATCHED a pair — the predicate can
+    // fire on a tick where pairSlots is still empty (e.g., the side
+    // band briefly aligns during M-slice manipulation before any pair
+    // is recorded). Without the guard, the flag flips on early and the
+    // anchor never gets set even after the pairs are detected.
     if (!block1DoneSeen && side1 && isRouxFirstBlockDoneOn(down, side1, facelets)) {
-      block1DoneSeen = true;
       for (let i = 0; i < pairSlots.length; i++) {
         const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
         if (slotFaces.has(side1)) {
@@ -572,9 +576,9 @@ function recomputeRouxPairTimingsFor(r: SolveRecord): boolean {
           }
         }
       }
+      if (block1FirstPairMs !== null) block1DoneSeen = true;
     }
     if (!block2DoneSeen && side1 && isRouxSecondBlockDoneOn(down, side1, facelets)) {
-      block2DoneSeen = true;
       const side2 = OPPOSITE[side1];
       for (let i = 0; i < pairSlots.length; i++) {
         const slotFaces = new Set(F2L_SLOTS[down][pairSlots[i]].map(([f]) => f));
@@ -584,28 +588,40 @@ function recomputeRouxPairTimingsFor(r: SolveRecord): boolean {
           }
         }
       }
+      if (block2FirstPairMs !== null) block2DoneSeen = true;
     }
     if (pairMs.length >= 4 && block1DoneSeen && block2DoneSeen) break;
   }
   if (pairMs.length === 0) return false;
   r.rouxPairTimingsMs = pairMs;
+  // Chronological fallback: the FIRST pair recorded is always in the
+  // first-finished block (= block 1) by construction, since block 2 can
+  // only finish AFTER block 1. So when the predicate-driven path didn't
+  // catch block 1 (e.g., side1 detection lagged behind pair detection,
+  // or both pairs of block 1 completed on a single move where the side
+  // band wasn't yet aligned), we can still anchor it from pairMs[0].
+  if (block1FirstPairMs === null && pairMs.length > 0) {
+    block1FirstPairMs = pairMs[0];
+  }
   if (block1FirstPairMs !== null) r.rouxBlock1FirstPairMs = block1FirstPairMs;
   if (block2FirstPairMs !== null) r.rouxBlock2FirstPairMs = block2FirstPairMs;
   return true;
 }
 
 // Roux/F3uL pair-timing backfill — runs once at init (and after JSON
-// import). Only touches records that have NO pair-timings data at
-// all; the manual per-row recompute button handles any case where
-// existing data needs re-derivation. (Equal-adjacent pair timings
-// can be legitimate: a single move that turns a center between two
-// pairs can complete both at once.)
+// import). Re-derives any record that's missing data or has known-
+// incomplete data from a since-fixed code path: pair timings absent
+// entirely, OR pair timings present but rouxBlock1FirstPairMs absent
+// (block-detection bug — see recomputeRouxPairTimingsFor). Records
+// produced by the current code path are left alone.
 function backfillRouxPairTimings() {
   if (!kpuzzle) return;
   let updated = 0;
   for (const r of history) {
     if (r.process !== 'roux' && r.process !== 'f3ul') continue;
-    if (r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0) continue;
+    const hasPairTimings = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length > 0;
+    const hasBlock1Anchor = typeof r.rouxBlock1FirstPairMs === 'number';
+    if (hasPairTimings && hasBlock1Anchor) continue;
     if (recomputeRouxPairTimingsFor(r)) updated++;
   }
   if (updated > 0) {
@@ -1098,6 +1114,29 @@ function chitLabelFor(r: SolveRecord, slot: string): string {
     return PHASE_KEY_LABELS[slot] ?? slot;
   }
   return PHASE_KEY_LABELS[slot] ?? slot;
+}
+
+// Process- and scheme-aware label for the COLLAPSED aggregate chit
+// shown when a phase group isn't focused. `group === 'cross'` returns
+// the "early phase done" milestone label; `'f2l'` returns the "middle
+// phase done" milestone label. Mirrors chitLabelFor's scheme dispatch
+// so the aggregate naturally reads as "the last sub-band's milestone".
+function chitAggregateLabelFor(r: SolveRecord, group: 'cross' | 'f2l'): string {
+  if (r.process === 'cfop') return group === 'cross' ? 'Cross' : 'F2L';
+  if (r.process === 'roux' || r.process === 'f3ul') {
+    const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
+    const scheme2 = prefs.rouxColorScheme === 2 && hasGranular;
+    if (group === 'cross') {
+      // Early phase fully done = 1st block done. In pair-count scheme
+      // the same milestone is "2nd pair done".
+      return scheme2 ? '2Pr' : '1Blk';
+    }
+    // Middle phase = 2nd block + (F3uL only) FML. F3uL → "FML" because
+    // FML is the closing milestone; Roux → "2Blk".
+    if (r.process === 'f3ul') return 'FML';
+    return scheme2 ? '4Pr' : '2Blk';
+  }
+  return group === 'cross' ? 'Cross' : 'F2L';
 }
 
 // Union of every chart slot any record in `records` contributes to,
@@ -2560,7 +2599,14 @@ function renderGraph() {
       keyOrder = expanded;
     }
   }
-  const labels = slice.map((_, i) => `${filtered.length - slice.length + i + 1}`);
+  // Multi-line X-axis ticks: solve number on top, process short name
+  // (CFOP / F3uL / Roux / Beg) underneath so mixed-process slices show
+  // at a glance which solves used which method. Chart.js renders an
+  // array-of-strings tick as a multi-line label.
+  const processShort = (p?: string): string => p === 'beginner' ? 'Beg' : p === 'f3ul' ? 'F3uL' : p === 'roux' ? 'Roux' : 'CFOP';
+  const labels = slice.map((r, i) =>
+    [`${filtered.length - slice.length + i + 1}`, processShort(r.process)],
+  );
 
   // Alpha-scaled green for F2L sub-bands. Legacy records (no f2lSplits)
   // are folded into sub-band 4 by phaseMsForDisplay, so they render at
@@ -2975,15 +3021,17 @@ function renderGraph() {
               && k.startsWith('f2l_') && k !== 'f2l_4') return;
           let ms: number;
           if (k.startsWith('cross_') || k.startsWith('f2l_') || k === 'f2l') {
-            // Collapsed aggregate chits: their value sums ALL sub-bands.
+            // Collapsed aggregate chits: their value sums ALL sub-bands;
+            // their label is the process-/scheme-aware milestone (e.g.,
+            // "1Blk" for F3uL/Roux scheme 1, "Cross" for CFOP, etc.).
             if (collapseCrossSubBands && k === crossAnchorKey) {
               ms = chartSlotMs(r, 'cross_1') + chartSlotMs(r, 'cross_2')
                  + chartSlotMs(r, 'cross_3') + chartSlotMs(r, 'cross_4');
-              label = 'Cross';
+              label = chitAggregateLabelFor(r, 'cross');
             } else if (collapseF2lSubBands && k === 'f2l_4') {
               ms = chartSlotMs(r, 'f2l_1') + chartSlotMs(r, 'f2l_2')
                  + chartSlotMs(r, 'f2l_3') + chartSlotMs(r, 'f2l_4');
-              label = 'F2L';
+              label = chitAggregateLabelFor(r, 'f2l');
             } else {
               ms = chartSlotMs(r, k);
               const override = chitLabelFor(r, k);
