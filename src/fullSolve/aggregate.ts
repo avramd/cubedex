@@ -81,11 +81,35 @@ export function phaseMsForDisplay(r: SolveRecord, displayKey: string): number {
     // existing cumulative phase durations p.f1b / p.f2b. All Math.max
     // guards because of rounding.
     //
-    // Scheme 1: block-aware.
-    case 'b1_pre':  return r.rouxBlock1FirstPairMs ?? 0;
-    case 'b1_done': return Math.max(0, (p.f1b ?? 0) - (r.rouxBlock1FirstPairMs ?? 0));
-    case 'b2_pre':  return Math.max(0, (r.rouxBlock2FirstPairMs ?? 0) - (p.f1b ?? 0));
-    case 'b2_done': return Math.max(0, ((p.f1b ?? 0) + (p.f2b ?? 0)) - (r.rouxBlock2FirstPairMs ?? 0));
+    // Scheme 1: block-aware. Anchors are clamped to enforce the invariants
+    //   b1_pre + b1_done === f1b
+    //   b2_pre + b2_done === f2b
+    // even when blocks are solved interleaved (e.g., 1 pair of block 2 done
+    // BEFORE block 1 is complete). Without clamping, the "block 2 first
+    // pair" anchor can sit BEFORE f1b, making b2_done overcount by the
+    // (already-attributed-to-block-1) interleaving time.
+    case 'b1_pre': {
+      const f1b = p.f1b ?? 0;
+      const anchor = r.rouxBlock1FirstPairMs ?? 0;
+      return Math.min(f1b, Math.max(0, anchor));
+    }
+    case 'b1_done': {
+      const f1b = p.f1b ?? 0;
+      const anchor = Math.min(f1b, Math.max(0, r.rouxBlock1FirstPairMs ?? 0));
+      return Math.max(0, f1b - anchor);
+    }
+    case 'b2_pre': {
+      const f1b = p.f1b ?? 0;
+      const f2b = p.f2b ?? 0;
+      const anchor = Math.max(f1b, r.rouxBlock2FirstPairMs ?? 0);
+      return Math.max(0, Math.min(f2b, anchor - f1b));
+    }
+    case 'b2_done': {
+      const f1b = p.f1b ?? 0;
+      const f2b = p.f2b ?? 0;
+      const anchor = Math.max(f1b, r.rouxBlock2FirstPairMs ?? 0);
+      return Math.max(0, (f1b + f2b) - anchor);
+    }
     // Scheme 2: chronological pair count. Anchor for rp4 is the
     // sum of f1b + f2b (= 2nd block done = 4 pairs done by definition).
     case 'rp1': return r.rouxPairTimingsMs?.[0] ?? 0;
