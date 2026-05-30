@@ -425,6 +425,14 @@
           <div class="relative mx-auto my-auto h-[300px] sm:h-[350px] md:h-[450px] lg:h-auto lg:flex-grow lg:min-h-0 max-w-[90vw]">
             <canvas id="statsGraph" class="w-full h-full"></canvas>
           </div>
+          <!-- History scroll bar — shown only when the filtered history
+               has more solves than the current "View last N" window.
+               The blue "window" rect inside the track visually represents
+               what portion of history the graph is currently showing;
+               drag it horizontally to scrub through older solves. -->
+          <div id="fs-graph-scroll" class="hidden relative w-full mt-2 h-3 rounded-full bg-gray-200 dark:bg-gray-700 select-none cursor-pointer" title="Drag to scroll through solve history.">
+            <div id="fs-graph-scroll-window" class="absolute top-0 bottom-0 rounded-full cursor-grab" style="background-color: rgba(59, 130, 246, 0.75);"></div>
+          </div>
         </div>
         <div id="metrics-container" class="min-w-[250px] lg:min-w-[290px] lg:max-w-[290px]">
           <div id="stats-grid" class="flex flex-col sm:flex-row lg:flex-col w-full justify-normal sm:justify-center lg:justify-normal">

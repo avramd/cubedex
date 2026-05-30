@@ -52,6 +52,12 @@ interface FullSolvePrefs {
   twoLookOll: boolean;
   twoLookPll: boolean;
   graphRange: number;
+  // How far back from the most-recent solve the graph window starts.
+  // 0 means "showing the latest `graphRange` solves" (default). Larger
+  // values shift the window toward older solves; clamped to
+  // [0, filtered.length - graphRange]. Reset to 0 on every new solve so
+  // the latest entry is always immediately visible.
+  graphOffset: number;
   graphYClip: '1sd' | '2sd' | 'log';
   graphAo5: boolean;
   graphAo12: boolean;
@@ -103,6 +109,7 @@ const defaultPrefs: FullSolvePrefs = {
   twoLookOll: false,
   twoLookPll: false,
   graphRange: 20,
+  graphOffset: 0,
   graphYClip: '1sd',
   graphAo5: true,
   graphAo12: true,
@@ -1242,6 +1249,8 @@ const singlePbBoxEl = () => $$('single-pb-box');
 const leftSideInnerEl = () => $$('left-side-inner');
 const fsGraphRangeEl = () => $$<HTMLInputElement>('fs-graph-range');
 const fsGraphRangeValueEl = () => $$('fs-graph-range-value');
+const fsGraphScrollEl = () => $$('fs-graph-scroll');
+const fsGraphScrollWindowEl = () => $$('fs-graph-scroll-window');
 const fsGraphYClipEl = () => $$<HTMLSelectElement>('fs-graph-yclip');
 const fsGraphAo5El = () => $$<HTMLInputElement>('fs-graph-ao5');
 const fsGraphAo12El = () => $$<HTMLInputElement>('fs-graph-ao12');
@@ -2419,6 +2428,10 @@ function finishSolve() {
         : {}),
   };
   history.push(record);
+  // New solve lands — snap the graph window back to the latest entry
+  // so the user sees their fresh result, regardless of where they were
+  // scrolled before.
+  if (prefs.graphOffset !== 0) { prefs.graphOffset = 0; savePrefs(); }
   // Reverse-engineer per-sub-phase splits from the just-captured scramble
   // + solution + r.turns. The live tracker can drop data in edge cases
   // (cross face not yet locked, down-face race, etc.), so the replay is
@@ -2587,6 +2600,102 @@ function makeStripePattern(isDark: boolean): CanvasPattern | null {
   return ctx.createPattern(c, 'repeat');
 }
 
+// History scroll bar — hidden when the filtered history fits inside
+// the current "View last N" window (no scrolling needed). Otherwise
+// the window rect's width = range/total of the track, and its right
+// edge sits at (total - offset)/total of the track. Pointer drag on
+// the window updates prefs.graphOffset and re-renders the graph.
+function renderGraphScrollbar(totalCount: number, range: number, offset: number) {
+  const track = fsGraphScrollEl();
+  const win = fsGraphScrollWindowEl();
+  if (!track || !win) return;
+  if (totalCount <= range) {
+    track.classList.add('hidden');
+    return;
+  }
+  track.classList.remove('hidden');
+  const widthPct = (range / totalCount) * 100;
+  // offset=0 → window flush right. offset=maxOffset → window flush left.
+  const rightFromRightPct = (offset / totalCount) * 100;
+  const leftPct = 100 - widthPct - rightFromRightPct;
+  win.style.left = `${leftPct}%`;
+  win.style.width = `${widthPct}%`;
+  win.title = `Solves ${totalCount - range - offset + 1}–${totalCount - offset} of ${totalCount}`;
+}
+
+// Drag handling on the scroll window. Installed once at init; uses the
+// element's data-* state so multiple drag sessions don't accumulate
+// stale closure refs. Capture pointer so the drag survives leaving
+// the window's hit area.
+function wireGraphScrollbarDrag() {
+  const track = fsGraphScrollEl();
+  const win = fsGraphScrollWindowEl();
+  if (!track || !win) return;
+  let dragStartX = 0;
+  let dragStartOffset = 0;
+  let dragTotalCount = 0;
+  win.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const filtered = filteredHistory();
+    dragTotalCount = filtered.length;
+    const range = Math.max(1, Math.min(filtered.length, prefs.graphRange));
+    if (dragTotalCount <= range) return; // nothing to scroll
+    dragStartX = e.clientX;
+    dragStartOffset = prefs.graphOffset;
+    win.style.cursor = 'grabbing';
+    win.setPointerCapture(e.pointerId);
+  });
+  win.addEventListener('pointermove', (e) => {
+    if (!win.hasPointerCapture(e.pointerId)) return;
+    const trackRect = track.getBoundingClientRect();
+    if (trackRect.width <= 0) return;
+    const dx = e.clientX - dragStartX;
+    // Dragging right → newer end → DECREASES offset (offset is from
+    // right). Map pixel delta to a solve-count delta via the track-
+    // width-to-history-count ratio.
+    const dOffset = -(dx / trackRect.width) * dragTotalCount;
+    const range = Math.max(1, Math.min(dragTotalCount, prefs.graphRange));
+    const maxOffset = Math.max(0, dragTotalCount - range);
+    const next = Math.round(Math.max(0, Math.min(maxOffset, dragStartOffset + dOffset)));
+    if (next !== prefs.graphOffset) {
+      prefs.graphOffset = next;
+      savePrefs();
+      renderGraph();
+    }
+  });
+  win.addEventListener('pointerup', (e) => {
+    if (win.hasPointerCapture(e.pointerId)) win.releasePointerCapture(e.pointerId);
+    win.style.cursor = '';
+  });
+  win.addEventListener('pointercancel', (e) => {
+    if (win.hasPointerCapture(e.pointerId)) win.releasePointerCapture(e.pointerId);
+    win.style.cursor = '';
+  });
+  // Click on the empty track outside the window: jump-by-window in
+  // that direction. Lets the user quickly page through older solves
+  // without dragging.
+  track.addEventListener('pointerdown', (e) => {
+    if (e.target !== track) return; // ignore clicks on the window itself
+    const filtered = filteredHistory();
+    const total = filtered.length;
+    const range = Math.max(1, Math.min(total, prefs.graphRange));
+    if (total <= range) return;
+    const winRect = win.getBoundingClientRect();
+    const clickedLeftOfWindow = e.clientX < winRect.left;
+    const maxOffset = Math.max(0, total - range);
+    const step = Math.max(1, Math.round(range * 0.9));
+    const next = clickedLeftOfWindow
+      ? Math.min(maxOffset, prefs.graphOffset + step)
+      : Math.max(0, prefs.graphOffset - step);
+    if (next !== prefs.graphOffset) {
+      prefs.graphOffset = next;
+      savePrefs();
+      renderGraph();
+    }
+  });
+}
+
 function renderGraph() {
   const canvas = fsGraphCanvasEl();
   if (!canvas) return;
@@ -2594,7 +2703,17 @@ function renderGraph() {
   // graph + AoX trendlines all reflect the same view.
   const filtered = filteredHistory();
   const range = Math.max(1, Math.min(filtered.length, prefs.graphRange));
-  const slice = filtered.slice(-range);
+  // Window-into-history scroll offset. Clamped to [0, maxOffset] every
+  // render so it's always valid even after a filter / range change.
+  const maxOffset = Math.max(0, filtered.length - range);
+  if (prefs.graphOffset < 0 || prefs.graphOffset > maxOffset) {
+    prefs.graphOffset = Math.max(0, Math.min(prefs.graphOffset, maxOffset));
+    savePrefs();
+  }
+  const endIdx = filtered.length - prefs.graphOffset;
+  const startIdx = Math.max(0, endIdx - range);
+  const slice = filtered.slice(startIdx, endIdx);
+  renderGraphScrollbar(filtered.length, range, prefs.graphOffset);
   if (slice.length === 0) {
     if (graphChart) { graphChart.destroy(); graphChart = null; }
     return;
@@ -4949,6 +5068,7 @@ function wireAdvancedFilterDialog() {
 
 export function initFullSolve() {
   wireEvents();
+  wireGraphScrollbarDrag();
   applyPrefsToUI();
   // phaseSeq must be initialised BEFORE applyFullSolveMode, since the latter
   // calls renderStatsLegend which builds the per-phase color key from phaseSeq.
