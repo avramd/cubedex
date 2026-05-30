@@ -129,6 +129,23 @@ function savePrefs() {
 
 let prefs: FullSolvePrefs = loadPrefs();
 
+// Persists the most-recent unsolved scramble across reloads. When the
+// auto-newScramble fires on a fresh boot we hand this back so the user
+// resumes the same scramble they were working on. Cleared on solve
+// completion (finishSolve); overwritten whenever a new scramble is set
+// (manual "new scramble" click, target-from-history, peer share, etc.),
+// so those flows naturally "forget" the previous one.
+const ACTIVE_SCRAMBLE_KEY = 'fsActiveScramble';
+function saveActiveScramble(scramble: string) {
+  try { localStorage.setItem(ACTIVE_SCRAMBLE_KEY, scramble); } catch { /* ignore */ }
+}
+function loadActiveScramble(): string | null {
+  try { return localStorage.getItem(ACTIVE_SCRAMBLE_KEY); } catch { return null; }
+}
+function clearActiveScramble() {
+  try { localStorage.removeItem(ACTIVE_SCRAMBLE_KEY); } catch { /* ignore */ }
+}
+
 // ---------- Solve history ----------
 
 const HISTORY_KEY = 'fullSolveHistory';
@@ -1003,7 +1020,14 @@ function chartSlotMs(r: SolveRecord, slot: string): number {
         if (slot === 'cross_1') return cs[0];
         if (slot === 'cross_2') return Math.max(0, cs[1] - cs[0]);
         if (slot === 'cross_3') return Math.max(0, cs[2] - cs[1]);
-        if (slot === 'cross_4') return Math.max(0, cs[3] - cs[2]);
+        // cross_4 extends to the cross-done predicate firing, not just
+        // the 4th-edge-placement timestamp. crossSplits[i] locks the
+        // FIRST time the edge count hit i+1 (and stays put if the user
+        // later breaks and re-places an edge), so cs[3] can be earlier
+        // than p.cross. Mirroring f2lSubBandMs's subEnds[3] = f2lMs
+        // clamp keeps the sub-bands summing to p.cross instead of
+        // leaving a gap before F2L.
+        if (slot === 'cross_4') return Math.max(0, (p.cross ?? 0) - cs[2]);
       }
       return slot === 'cross_3' ? (p.cross ?? 0) : 0;
     }
@@ -1880,7 +1904,7 @@ let phaseReachedAtMoveIdx: number[] = [];
 
 // ---------- Scramble flow ----------
 
-async function newScramble() {
+async function newScramble(opts?: { restore?: boolean }) {
   resetSolveState();
   renderStatus('Generating scramble…');
   if (!kpuzzle) {
@@ -1890,7 +1914,15 @@ async function newScramble() {
   const start = lastPattern ?? kpuzzle.defaultPattern();
   // Start our internal pattern in sync with the tracker's pattern.
   myPattern = start;
-  if (pendingScramble) {
+  // Restore takes priority over pendingScramble / random generation: on
+  // a fresh boot the auto-newScramble passes restore=true so the user
+  // resumes whatever scramble they last had active. Any manual flow
+  // (button, target-from-history, peer share) passes restore=false and
+  // overwrites the saved scramble naturally via the save call below.
+  const restored = opts?.restore ? loadActiveScramble() : null;
+  if (restored) {
+    currentScramble = restored;
+  } else if (pendingScramble) {
     currentScramble = pendingScramble;
     pendingScramble = null;
   } else {
@@ -1917,6 +1949,9 @@ async function newScramble() {
   if (abortBtn) abortBtn.disabled = true;
   renderScrambleDisplay();
   renderReplayScrambleBtn();
+  // Persist the active scramble for cross-reload restoration. Cleared
+  // on solve completion (finishSolve). See ACTIVE_SCRAMBLE_KEY.
+  saveActiveScramble(currentScramble);
   const startFacelets = patternToFacelets(start);
   if (!isSolved(startFacelets)) {
     renderStatus('Cube is not solved — scramble starts from current state. For a fair scramble, solve your cube first.');
@@ -2309,6 +2344,10 @@ function finishSolve() {
   if (mode !== 'solving') return;
   mode = 'done';
   solveEndMs = Date.now();
+  // The scramble has been solved — no longer "unsolved", so drop the
+  // persisted active scramble. The next auto-newScramble will generate
+  // fresh.
+  clearActiveScramble();
   cancelAnimationFrame(timerRafHandle);
   renderTimer();
   const pauseBtn = fsPauseBtnEl();
@@ -3719,6 +3758,11 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
   // graph's visual decomposition.
   const order = displayPhaseSequenceFor(r);
   const splitF2l = prefs.f2lSplits && Array.isArray(r.f2lSplits) && r.f2lSplits.length > 0;
+  // Cross splits render unconditionally when the record carries them
+  // (no toggle), matching the multi-solve chart. CFOP only — Roux/F3uL
+  // don't have a 'cross' aggregate band in this popup.
+  const splitCross = r.process === 'cfop'
+    && Array.isArray(r.crossSplits) && r.crossSplits.length === 4;
   let acc = 0;
   const bands: { start: number; end: number; color: string }[] = [];
   for (const key of order) {
@@ -3729,7 +3773,30 @@ function openTurnGraphPopup(r: SolveRecord, opener: HTMLElement) {
     const start = acc / 1000;
     acc += ms;
     const end = acc / 1000;
-    if (key === 'f2l' && splitF2l) {
+    if (key === 'cross' && splitCross) {
+      // Sub-band boundaries inside the cross window, in seconds. Same
+      // shape as the F2L sub-band code below; pinning the 4th bound to
+      // the cross-band end mirrors chartSlotMs's cross_4 clamp and
+      // keeps the sub-bands summing to p.cross (no gap if a crossSplit
+      // locked early and the cross predicate fired later).
+      const splits = r.crossSplits!;
+      const crossEndSec = end;
+      const bounds: number[] = [start];
+      for (let i = 0; i < 4; i++) {
+        const tSec = splits[i] / 1000;
+        const clamped = Math.max(bounds[bounds.length - 1], Math.min(tSec, crossEndSec));
+        bounds.push(clamped);
+      }
+      bounds[bounds.length - 1] = crossEndSec;
+      const ALPHAS = [0.30, 0.45, 0.60, 0.75];
+      for (let i = 0; i < 4; i++) {
+        const s = bounds[i];
+        const e = bounds[i + 1];
+        if (e <= s) continue;
+        const color = PHASE_COLORS[0].replace(/,\s*[\d.]+\)\s*$/, `, ${ALPHAS[i]})`);
+        bands.push({ start: s, end: e, color });
+      }
+    } else if (key === 'f2l' && splitF2l) {
       // Sub-band boundaries inside the F2L window, in seconds.
       // splits[i] is ms-from-solve-start at slot count i+1. Clamp into
       // the F2L window and enforce monotonicity.
@@ -4989,8 +5056,11 @@ export function fsSetCubeConnected(connected: boolean) {
   if (connected) connectStatus = null;
   updateCubeGate();
   if (connected && prefs.enabled && mode === 'idle') {
-    // Cube just connected — kick off a scramble to solve.
-    void newScramble();
+    // Cube just connected — kick off a scramble to solve. Pass
+    // restore:true so that a fresh boot resumes whatever scramble was
+    // active before the reload, instead of generating a new one each
+    // time the user opens the app.
+    void newScramble({ restore: true });
   }
   if (!connected && (mode === 'scrambling' || mode === 'inspection' || mode === 'solving' || mode === 'paused')) {
     // Cube disconnected mid-flow; abort and return to idle. The status
