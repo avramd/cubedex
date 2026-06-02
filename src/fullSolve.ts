@@ -1241,7 +1241,8 @@ const fsFilterMoveExcludeEl = () => $$<HTMLButtonElement>('fs-filter-move-exclud
 // Full Solve renders into the same large graphing area training mode uses.
 const fsGraphCanvasEl = () => $$<HTMLCanvasElement>('statsGraph');
 const algStatsEl = () => $$('alg-stats');
-const algNameDisplay2El = () => $$('alg-name-display2');
+const algNameDisplay2TitleEl = () => $$('alg-name-display2-title');
+const algNameDisplay2MetaEl = () => $$('alg-name-display2-meta');
 const statsLegendEl = () => $$('stats-legend');
 const averageTimeBoxEl = () => $$('average-time-box');
 const averageTpsBoxEl = () => $$('average-tps-box');
@@ -1503,8 +1504,10 @@ function applyFullSolveMode() {
     if (algStatsEl()) (algStatsEl() as HTMLElement).style.display = 'none';
     // Restore the original Single/Ao5/Ao12 legend that training mode draws.
     restoreTrainingLegend();
-    const algNameEl = algNameDisplay2El();
-    if (algNameEl) algNameEl.textContent = '';
+    const titleEl = algNameDisplay2TitleEl();
+    if (titleEl) titleEl.textContent = '';
+    const metaEl = algNameDisplay2MetaEl();
+    if (metaEl) metaEl.textContent = '';
   }
 }
 
@@ -1583,7 +1586,7 @@ function renderStatsBoxes() {
   if (singlePbBoxEl()) singlePbBoxEl()!.innerHTML = `Single PB<br />${formatTime(pb)}`;
 
   // Header text — reflect current method choice.
-  const algNameEl = algNameDisplay2El();
+  const algNameEl = algNameDisplay2TitleEl();
   if (algNameEl) {
     const optionTags: string[] = [];
     if (prefs.process === 'cfop') {
@@ -3658,6 +3661,7 @@ function renderGraph() {
         if (ch.$activeIndex !== newIdx || ch.$inAxes !== inAxes) {
           ch.$activeIndex = newIdx;
           ch.$inAxes = inAxes;
+          setHoverMeta(newIdx);
           chart.draw();
         }
 
@@ -3734,6 +3738,20 @@ function renderGraph() {
   // outer #alg-stats wrapper so the guide + aggregate labels keep updating
   // as the cursor moves anywhere within the stats area (chart + metric
   // boxes), and only clear when the cursor leaves the wrapper entirely.
+
+  // Right-aligned meta line on the graph title row — shows the hovered
+  // solve's recorded timestamp (finish time) in the browser's local
+  // timezone. Empty when no solve is hovered.
+  const setHoverMeta = (idx: number) => {
+    const metaEl = algNameDisplay2MetaEl();
+    if (!metaEl) return;
+    if (idx < 0 || idx >= slice.length) { metaEl.textContent = ''; return; }
+    metaEl.textContent = new Date(slice[idx].ts).toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+    });
+  };
+
   const clearHover = () => {
     if (!graphChart) return;
     const ch = graphChart as any;
@@ -3742,6 +3760,7 @@ function renderGraph() {
       ch.$inAxes = false;
       graphChart.draw();
     }
+    setHoverMeta(-1);
     // Also reset the focus-hover cursor when the pointer leaves the
     // stats area entirely.
     if (graphChart.canvas) (graphChart.canvas as HTMLCanvasElement).style.cursor = '';
@@ -3773,6 +3792,7 @@ function renderGraph() {
       if (ch.$activeIndex !== newIdx || ch.$inAxes !== inAxes) {
         ch.$activeIndex = newIdx;
         ch.$inAxes = inAxes;
+        setHoverMeta(newIdx);
         graphChart.draw();
       }
     };
