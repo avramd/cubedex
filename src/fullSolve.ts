@@ -158,33 +158,141 @@ function clearActiveScramble() {
 const HISTORY_KEY = 'fullSolveHistory';
 const HISTORY_CAP = 2000;
 
-function loadHistory(): SolveRecord[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    // Migrate older records that used the 'wc' phase key to 'cross'.
-    arr.forEach((r: SolveRecord) => {
-      if (r.phases && Object.prototype.hasOwnProperty.call(r.phases, 'wc')) {
-        if (!Object.prototype.hasOwnProperty.call(r.phases, 'cross')) {
-          r.phases.cross = r.phases.wc;
-        }
-        delete r.phases.wc;
+// IndexedDB backing store for solve history. Sized for thousands of
+// solves (localStorage's 5–10 MB cap was the bottleneck). Each record
+// goes in keyed by `ts`. `turns` is converted to Float32Array on write
+// so the largest per-record field is ~4× smaller on disk; rounded back
+// to a plain number[] on read so the in-memory schema is unchanged.
+// Float32 has ~240 ns resolution at WR-scale timestamps — well past
+// what the cube hardware can produce — so the precision narrowing is
+// invisible to any analysis the app does.
+const IDB_NAME = 'cubedex';
+const IDB_VERSION = 1;
+const IDB_SOLVES = 'solves';
+let idbPromise: Promise<IDBDatabase> | null = null;
+function openSolveDb(): Promise<IDBDatabase> {
+  if (idbPromise) return idbPromise;
+  idbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_SOLVES)) {
+        db.createObjectStore(IDB_SOLVES, { keyPath: 'ts' });
       }
-    });
-    return arr;
-  } catch { return []; }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return idbPromise;
+}
+
+async function idbReadAllSolves(): Promise<SolveRecord[]> {
+  const db = await openSolveDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_SOLVES, 'readonly');
+    const req = tx.objectStore(IDB_SOLVES).getAll();
+    req.onsuccess = () => resolve(((req.result as any[]) ?? []).map(idbRecordIn));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbWriteAllSolves(records: SolveRecord[]): Promise<void> {
+  const db = await openSolveDb();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(IDB_SOLVES, 'readwrite');
+    const store = tx.objectStore(IDB_SOLVES);
+    store.clear();
+    for (const r of records) store.put(idbRecordOut(r));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+// Boundary converters. Float32Array on disk; plain number[] in memory.
+function idbRecordOut(r: SolveRecord): SolveRecord {
+  if (!r.turns) return r;
+  return { ...r, turns: new Float32Array(r.turns) as unknown as number[] };
+}
+function idbRecordIn(r: any): SolveRecord {
+  if (r && r.turns instanceof Float32Array) {
+    r = { ...r, turns: Array.from(r.turns as Float32Array) };
+  }
+  // Legacy phase-key migration: pre-rename records used 'wc' for cross.
+  if (r?.phases && Object.prototype.hasOwnProperty.call(r.phases, 'wc')) {
+    if (!Object.prototype.hasOwnProperty.call(r.phases, 'cross')) {
+      r.phases.cross = r.phases.wc;
+    }
+    delete r.phases.wc;
+  }
+  return r as SolveRecord;
+}
+
+// One-time copy of the previous localStorage history into IndexedDB.
+// Called by initHistoryStorage() when IDB is empty and localStorage has
+// data. After a successful copy, removes the localStorage key so the
+// 5–10 MB budget there is freed for other uses. Safe to re-run — IDB
+// non-emptiness short-circuits it.
+async function migrateLocalStorageToIdb(): Promise<SolveRecord[]> {
+  const raw = localStorage.getItem(HISTORY_KEY);
+  if (!raw) return [];
+  let arr: any;
+  try { arr = JSON.parse(raw); } catch {
+    console.warn('[history] migration skipped: localStorage payload was not parseable JSON.');
+    return [];
+  }
+  if (!Array.isArray(arr)) {
+    console.warn('[history] migration skipped: localStorage payload was not an array.');
+    return [];
+  }
+  const t0 = performance.now();
+  const localBytes = raw.length;
+  console.log(`[history] migrating ${arr.length} solves from localStorage (${(localBytes / 1024).toFixed(1)} KB JSON) → IndexedDB…`);
+  const records: SolveRecord[] = arr.map(idbRecordIn);
+  await idbWriteAllSolves(records);
+  try { localStorage.removeItem(HISTORY_KEY); } catch { /* ignore */ }
+  const dt = (performance.now() - t0).toFixed(0);
+  const turnsCount = records.reduce((n, r) => n + (r.turns?.length ?? 0), 0);
+  console.log(`[history] migration complete in ${dt} ms — ${records.length} solves stored, ` +
+              `${turnsCount} turn samples converted number[] → Float32Array, localStorage key removed.`);
+  return records;
+}
+
+// Async boot: populate the in-memory `history` array from IDB. If IDB
+// is empty we try the legacy localStorage payload (and migrate it).
+// Anything that consumes `history` must run AFTER this resolves —
+// initFullSolve awaits it before kicking off the first renders.
+async function initHistoryStorage(): Promise<void> {
+  let records: SolveRecord[] = [];
+  const t0 = performance.now();
+  try {
+    records = await idbReadAllSolves();
+    if (records.length === 0) {
+      records = await migrateLocalStorageToIdb();
+    } else {
+      const dt = (performance.now() - t0).toFixed(0);
+      console.log(`[history] loaded ${records.length} solves from IndexedDB in ${dt} ms.`);
+    }
+  } catch (err) {
+    console.error('[history] storage init failed', err);
+    return;
+  }
+  records.sort((a, b) => a.ts - b.ts);
+  history.length = 0;
+  history.push(...records);
 }
 
 function saveHistory() {
-  try {
-    while (history.length > HISTORY_CAP) history.shift();
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-  } catch { /* ignore */ }
+  while (history.length > HISTORY_CAP) history.shift();
+  // Fire-and-forget. The write is async but the in-memory array is
+  // already up to date; callers don't need to wait. Failures are
+  // logged — there's nothing useful to do besides surface them.
+  void idbWriteAllSolves(history.slice()).catch(err => {
+    console.error('saveHistory write failed', err);
+  });
 }
 
-let history: SolveRecord[] = loadHistory();
+const history: SolveRecord[] = [];
 
 function exportHistoryAsJson() {
   const blob = new Blob([JSON.stringify(history, null, 2)], { type: 'application/json' });
@@ -219,7 +327,8 @@ function exportHistoryAsCsvFile() {
 // the per-batch counts. Pure merge logic lives in fullSolve/historyMerge.ts.
 function mergeImportedHistory(incoming: any[]): { added: number; replaced: number; skipped: number } {
   const { merged, added, replaced, skipped } = mergeHistoryPure(history, incoming, HISTORY_CAP);
-  history = merged;
+  history.length = 0;
+  history.push(...merged);
   saveHistory();
   return { added, replaced, skipped };
 }
@@ -660,7 +769,9 @@ function importHistoryFromText(text: string) {
   try { parsed = JSON.parse(text); } catch { alert('Import failed: invalid JSON.'); return; }
   if (!Array.isArray(parsed)) { alert('Import failed: expected a JSON array of solves.'); return; }
   const before = history.length;
-  const { added, replaced, skipped } = mergeImportedHistory(parsed);
+  // Run incoming records through the same boundary normaliser used on
+  // IDB reads so legacy `wc` → `cross` phase-key migration applies.
+  const { added, replaced, skipped } = mergeImportedHistory(parsed.map(idbRecordIn));
   // Imported records may have `turns` but no `f2lSplits`; replay them so
   // the F2L-slots toggle has data to show.
   backfillF2lSplits();
@@ -5209,7 +5320,12 @@ function wireAdvancedFilterDialog() {
 
 // ---------- Public API ----------
 
-export function initFullSolve() {
+export async function initFullSolve() {
+  // History lives in IndexedDB now; wait for the read (and any
+  // one-time localStorage → IDB migration) to complete before kicking
+  // off the first render passes, so the graph and stats reflect the
+  // user's full record from frame 1.
+  await initHistoryStorage();
   wireEvents();
   wireGraphScrollbarDrag();
   applyPrefsToUI();
