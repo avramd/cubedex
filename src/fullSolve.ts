@@ -156,7 +156,7 @@ function clearActiveScramble() {
 // ---------- Solve history ----------
 
 const HISTORY_KEY = 'fullSolveHistory';
-const HISTORY_CAP = 500;
+const HISTORY_CAP = 2000;
 
 function loadHistory(): SolveRecord[] {
   try {
@@ -2785,14 +2785,13 @@ function renderGraph() {
       keyOrder = expanded;
     }
   }
-  // Multi-line X-axis ticks: solve number on top, process short name
-  // (CFOP / F3uL / Roux / Beg) underneath so mixed-process slices show
-  // at a glance which solves used which method. Chart.js renders an
-  // array-of-strings tick as a multi-line label.
+  // Both x-axis label rows — solve number and process short name
+  // (CFOP / F3uL / Roux / Beg) — are drawn by xAxisLabelsPlugin below.
+  // Native tick rendering is off so the plugin can react to hover on
+  // every frame without forcing a full chart.update().
   const processShort = (p?: string): string => p === 'beginner' ? 'Beg' : p === 'f3ul' ? 'F3uL' : p === 'roux' ? 'Roux' : 'CFOP';
-  const labels = slice.map((r, i) =>
-    [`${filtered.length - slice.length + i + 1}`, processShort(r.process)],
-  );
+  const labels = slice.map((_, i) => `${filtered.length - slice.length + i + 1}`);
+  const processesBySliceIdx = slice.map(r => processShort(r.process));
 
   // Alpha-scaled green for F2L sub-bands. Legacy records (no f2lSplits)
   // are folded into sub-band 4 by phaseMsForDisplay, so they render at
@@ -3431,11 +3430,128 @@ function renderGraph() {
     },
   };
 
+  // Draws both rows of x-axis labels — solve number (top, 11px) and
+  // process short name (bottom, 9px). One shared stride sized for the
+  // widest solve number gates both rows together (they appear and
+  // disappear as a pair). The process row picks the longest uniform
+  // abbreviation length (4 / 3 / 2 / 1 chars) that fits the per-shown
+  // column. The hovered solve always renders its full number + full
+  // process at higher contrast, inside a background pill — so any
+  // solve is identifiable regardless of density. Reads
+  // chart.$activeIndex on every frame so the existing mousemove →
+  // chart.draw() path updates hover without a full chart.update().
+  const labelColor = isDark ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.62)';
+  const labelColorActive = isDark ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)';
+  const xAxisLabelsPlugin = {
+    id: 'xAxisLabels',
+    afterDraw(chart: any) {
+      const xScale = chart.scales?.x;
+      const ca = chart.chartArea;
+      if (!xScale || !ca) return;
+      const labelsArr: string[] = chart.data?.labels ?? [];
+      const total = labelsArr.length;
+      if (!total) return;
+      const perTick = (ca.right - ca.left) / total;
+      const activeIdx = chart.$activeIndex ?? -1;
+      const c2d: CanvasRenderingContext2D = chart.ctx;
+      c2d.save();
+      // Compute ONE shared stride that drives both the solve number
+      // and the process label — they appear/disappear as a pair. The
+      // stride is sized to fit the widest solve number in the slice
+      // (with a small breathing pad). The process row then picks the
+      // longest abbreviation length whose widest variant fits inside
+      // the SAME per-shown width — never wider than the numbers.
+      c2d.font = '11px sans-serif';
+      const widestNumPx = c2d.measureText(labelsArr[total - 1]).width + 4;
+      const stride = Math.max(1, Math.ceil(widestNumPx / perTick));
+      const availPerShown = stride * perTick;
+      c2d.font = '9px sans-serif';
+      const abbrev = (p: string, L: number) => p.length <= L ? p : p.slice(0, L);
+      const widthAtLen = (L: number) => {
+        let max = 0;
+        for (const p of processesBySliceIdx) {
+          if (!p) continue;
+          max = Math.max(max, c2d.measureText(abbrev(p, L)).width);
+        }
+        return max;
+      };
+      // Try lengths 4 → 1 and pick the longest that fits inside the
+      // per-shown column. With stride >= 1 numbers fit by construction;
+      // process labels are narrower at 9px so a fit is virtually
+      // guaranteed (worst-case lands on L=1).
+      let procLen = 1;
+      const PROC_PAD = 4;
+      for (const L of [4, 3, 2, 1]) {
+        if (widthAtLen(L) + PROC_PAD <= availPerShown) { procLen = L; break; }
+      }
+      const yNum = ca.bottom + 4;
+      const yProc = ca.bottom + 18;
+      c2d.textAlign = 'center';
+      c2d.textBaseline = 'top';
+      // Main pass: iterate by stride so number + process appear and
+      // disappear together. The active tick (if any) is deferred to
+      // the block below so it can render full + with a background.
+      c2d.fillStyle = labelColor;
+      for (let i = 0; i < total; i += stride) {
+        if (i === activeIdx) continue;
+        const x = xScale.getPixelForValue(i);
+        const procFull = processesBySliceIdx[i];
+        c2d.font = '11px sans-serif';
+        c2d.fillText(labelsArr[i], x, yNum);
+        if (procFull) {
+          c2d.font = '9px sans-serif';
+          c2d.fillText(abbrev(procFull, procLen), x, yProc);
+        }
+      }
+      // Active tick: full number + full process inside a background
+      // pill, drawn last so it sits cleanly over any neighbours.
+      if (activeIdx >= 0 && activeIdx < total) {
+        const x = xScale.getPixelForValue(activeIdx);
+        const numStr = labelsArr[activeIdx];
+        const procStr = processesBySliceIdx[activeIdx] ?? '';
+        // Measure both lines so the background pill snugly contains
+        // whichever is wider.
+        c2d.font = '11px sans-serif';
+        const numW = c2d.measureText(numStr).width;
+        c2d.font = '9px sans-serif';
+        const procW = procStr ? c2d.measureText(procStr).width : 0;
+        const pad = 4;
+        const boxW = Math.max(numW, procW) + pad * 2;
+        const boxLeft = x - boxW / 2;
+        const boxTop = yNum - 2;
+        const boxBot = yProc + 11; // 9px font + ~2px descent
+        const boxH = boxBot - boxTop;
+        const bg = isDark ? 'rgba(31,41,55,0.95)' : 'rgba(255,255,255,0.95)';
+        const border = isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.25)';
+        c2d.fillStyle = bg;
+        c2d.strokeStyle = border;
+        c2d.lineWidth = 1;
+        if (typeof (c2d as any).roundRect === 'function') {
+          c2d.beginPath();
+          (c2d as any).roundRect(boxLeft, boxTop, boxW, boxH, 3);
+          c2d.fill();
+          c2d.stroke();
+        } else {
+          c2d.fillRect(boxLeft, boxTop, boxW, boxH);
+          c2d.strokeRect(boxLeft, boxTop, boxW, boxH);
+        }
+        c2d.fillStyle = labelColorActive;
+        c2d.font = '11px sans-serif';
+        c2d.fillText(numStr, x, yNum);
+        if (procStr) {
+          c2d.font = '9px sans-serif';
+          c2d.fillText(procStr, x, yProc);
+        }
+      }
+      c2d.restore();
+    },
+  };
+
   if (graphChart) graphChart.destroy();
   graphChart = new Chart(canvas, {
     type: 'line',
     data: { labels, datasets },
-    plugins: [inlineSplitLabels],
+    plugins: [inlineSplitLabels, xAxisLabelsPlugin],
     options: {
       responsive: true,
       animation: false,
@@ -3600,7 +3716,14 @@ function renderGraph() {
       },
       scales: {
         y: yOpts,
-        x: { ticks: { autoSkip: true, maxRotation: 0 } },
+        x: {
+          // Native tick labels are off — xAxisLabelsPlugin draws both
+          // the solve number (top, 11px) and the process short name
+          // (bottom, 9px). Reserve ~26px of bottom padding for the
+          // two rows.
+          afterFit: (scale: any) => { scale.paddingBottom = (scale.paddingBottom ?? 0) + 26; },
+          ticks: { display: false, autoSkip: false, maxRotation: 0 },
+        },
       },
     },
   });
@@ -4521,10 +4644,10 @@ function applyPrefsToUI() {
   const cm = fsTwoLookCmllEl(); if (cm) cm.checked = prefs.twoLookCmll;
   const ls = fsThreeLookLseEl(); if (ls) ls.checked = prefs.threeLookLse;
   const rs = fsRouxSchemeEl(); if (rs) rs.value = String(prefs.rouxColorScheme);
-  // Slider range is fixed: 20 (min) to 500 (HISTORY_CAP). When history is
+  // Slider range is fixed: 10 (min) to HISTORY_CAP (max). When history is
   // shorter than the chosen range, renderGraph() clamps to history.length.
-  if (prefs.graphRange < 10 || prefs.graphRange > 500) {
-    prefs.graphRange = Math.max(10, Math.min(500, prefs.graphRange));
+  if (prefs.graphRange < 10 || prefs.graphRange > HISTORY_CAP) {
+    prefs.graphRange = Math.max(10, Math.min(HISTORY_CAP, prefs.graphRange));
     savePrefs();
   }
   const gr = fsGraphRangeEl(); if (gr) {
