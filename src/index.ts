@@ -27,6 +27,7 @@ import {
 
 import { faceletsToPattern, patternToFacelets } from './utils';
 import { COPY_ICON } from './icons';
+import { isSliceCandidate, getSliceForPair, SLICE_TOLERANCE_MS } from './fullSolve/moves';
 import {
   initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, fsSetConnectStatus, isFullSolveModeEnabled,
 } from './fullSolve';
@@ -1275,26 +1276,6 @@ let keepInitialState: boolean = false;
 let previousFacelets: string = '';
 let isBugged = false;
 
-const SLICE_PAIR_MAP: Record<string, string> = {
-  "R' L": "M'", "L R'": "M'",
-  "R L'": "M", "L' R": "M",
-  "R2 L2": "M2", "L2 R2": "M2",
-  "F' B": "S", "B F'": "S",
-  "F B'": "S'", "B' F": "S'",
-  "F2 B2": "S2", "B2 F2": "S2",
-  "D' U": "E", "U D'": "E",
-  "D U'": "E'", "U' D": "E'",
-  "D2 U2": "E2", "U2 D2": "E2",
-};
-
-function isSliceCandidate(move: string): boolean {
-  return 'RLFBUD'.includes(move.charAt(0));
-}
-
-function getSliceForPair(move1: string, move2: string): string | null {
-  return SLICE_PAIR_MAP[move1 + ' ' + move2] || null;
-}
-
 let sliceBuffer: { event: SmartCubeEvent; timer: ReturnType<typeof setTimeout> } | null = null;
 
 type Face = 'U' | 'D' | 'F' | 'B' | 'R' | 'L';
@@ -1356,42 +1337,44 @@ function remapMoveForPlayer(move: string): string {
 async function handleMoveEvent(event: SmartCubeEvent) {
   if (event.type !== "MOVE") return;
 
-  if (!gyroscopeEnabled) {
-    const moveStr = event.move;
-    if (isSliceCandidate(moveStr)) {
-      if (sliceBuffer) {
-        clearTimeout(sliceBuffer.timer);
-        const bufferedEvent = sliceBuffer.event;
-        sliceBuffer = null;
-        const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
-        const sliceMove = getSliceForPair(bufferedMove, moveStr);
-        if (sliceMove) {
-          twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
-          return processMoveEvent(event, sliceMove, bufferedEvent);
-        } else {
-          await processMoveEvent(bufferedEvent);
-          return processMoveEvent(event);
-        }
-      } else {
-        sliceBuffer = {
-          event,
-          timer: setTimeout(() => {
-            if (sliceBuffer) {
-              const ev = sliceBuffer.event;
-              sliceBuffer = null;
-              processMoveEvent(ev);
-            }
-          }, 100),
-        };
-        return;
-      }
-    }
+  // Slice-pair buffer-and-decide: runs regardless of gyro state. (Was
+  // previously gyro-gated, but nothing inside touches gyro and gyro-on
+  // is the typical state — gating meant slices never collapsed in
+  // normal use.)
+  const moveStr = event.move;
+  if (isSliceCandidate(moveStr)) {
     if (sliceBuffer) {
       clearTimeout(sliceBuffer.timer);
       const bufferedEvent = sliceBuffer.event;
       sliceBuffer = null;
-      await processMoveEvent(bufferedEvent);
+      const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
+      const sliceMove = getSliceForPair(bufferedMove, moveStr);
+      if (sliceMove) {
+        twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
+        return processMoveEvent(event, sliceMove, bufferedEvent);
+      } else {
+        await processMoveEvent(bufferedEvent);
+        return processMoveEvent(event);
+      }
+    } else {
+      sliceBuffer = {
+        event,
+        timer: setTimeout(() => {
+          if (sliceBuffer) {
+            const ev = sliceBuffer.event;
+            sliceBuffer = null;
+            processMoveEvent(ev);
+          }
+        }, SLICE_TOLERANCE_MS),
+      };
+      return;
     }
+  }
+  if (sliceBuffer) {
+    clearTimeout(sliceBuffer.timer);
+    const bufferedEvent = sliceBuffer.event;
+    sliceBuffer = null;
+    await processMoveEvent(bufferedEvent);
   }
 
   return processMoveEvent(event);

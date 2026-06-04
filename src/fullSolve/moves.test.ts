@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { collapseDoubles, getFace, moveClass, parseScramble, sumQuarters } from './moves';
+import {
+  collapseDoubles, collapseSlicesAndDoubles,
+  getFace, moveClass, parseScramble, sumQuarters,
+} from './moves';
 
 describe('moveClass', () => {
   it('classifies clockwise quarter-turns', () => {
@@ -96,6 +99,110 @@ describe('collapseDoubles', () => {
   it('is idempotent on already-collapsed input', () => {
     const collapsed = collapseDoubles(['R', 'R', 'U']);
     expect(collapseDoubles(collapsed)).toEqual(collapsed);
+  });
+});
+
+// All times are seconds-from-solve-start; tolerance is in MS. Helper to
+// keep the tests readable.
+const TOLERANCE = 80;
+
+describe('collapseSlicesAndDoubles — quarter-turn slice pass', () => {
+  it('collapses opposite-face pairs that fall within tolerance', () => {
+    // R' L within 50 ms → M'.
+    expect(collapseSlicesAndDoubles(["R'", 'L'], [1.000, 1.050], TOLERANCE))
+      .toEqual(["M'"]);
+  });
+
+  it('leaves pairs further apart than tolerance alone', () => {
+    expect(collapseSlicesAndDoubles(["R'", 'L'], [1.000, 1.200], TOLERANCE))
+      .toEqual(["R'", 'L']);
+  });
+
+  it('collapses well inside the tolerance and not just outside it', () => {
+    // 79 ms apart → collapses; 81 ms apart → does not. (Avoiding the
+    // exact-edge case sidesteps float-precision noise in the
+    // subtraction.)
+    expect(collapseSlicesAndDoubles(["R'", 'L'], [1.000, 1.079], TOLERANCE))
+      .toEqual(["M'"]);
+    expect(collapseSlicesAndDoubles(["R'", 'L'], [1.000, 1.081], TOLERANCE))
+      .toEqual(["R'", 'L']);
+  });
+
+  it('handles both orderings of the same slice pair', () => {
+    expect(collapseSlicesAndDoubles(["R'", 'L'], [0, 0.01], TOLERANCE)).toEqual(["M'"]);
+    expect(collapseSlicesAndDoubles(['L', "R'"], [0, 0.01], TOLERANCE)).toEqual(["M'"]);
+  });
+
+  it('does not over-eagerly chain: a slice token is not eligible as the next pair\'s first half', () => {
+    // R' L R': first pair (R' L) collapses to M' if fast; the third R'
+    // is left alone (M' + R' is not in the slice map).
+    expect(collapseSlicesAndDoubles(["R'", 'L', "R'"], [0, 0.01, 0.02], TOLERANCE))
+      .toEqual(["M'", "R'"]);
+  });
+
+  it('passes through non-slice opposite-face pairs', () => {
+    // R L is not in the slice map (only R L' / L' R are M); leave alone.
+    expect(collapseSlicesAndDoubles(['R', 'L'], [0, 0.01], TOLERANCE))
+      .toEqual(['R', 'L']);
+  });
+});
+
+describe('collapseSlicesAndDoubles — pipeline with doubles', () => {
+  it('parallel-hand M2 (R, L, R, L pattern) → two M tokens → M2', () => {
+    // Pattern simulating both hands flicking M2 simultaneously: each
+    // pair lands within 10 ms, gaps between pairs ~70 ms. After pass
+    // 1 the tokens are M' M'; pass 2's collapseDoubles strips the
+    // prime when collapsing same-token (M' M' done twice nets to a
+    // half-turn), yielding M2 — the canonical form.
+    expect(collapseSlicesAndDoubles(
+      ["R'", 'L', "R'", 'L'],
+      [0.000, 0.010, 0.070, 0.080],
+      TOLERANCE,
+    )).toEqual(['M2']);
+  });
+
+  it('sequential M2 (R, R, L, L pattern) catches the X2 slice in pass 3', () => {
+    // Pattern simulating R2 first, then L2: doubles collapse to
+    // [R2, L2], then the X2 pass folds them to M2.
+    expect(collapseSlicesAndDoubles(
+      ['R', 'R', 'L', 'L'],
+      [0.000, 0.060, 0.120, 0.180],
+      TOLERANCE,
+    )).toEqual(['M2']);
+  });
+
+  it('R2 L2 outside tolerance stays as two doubles', () => {
+    expect(collapseSlicesAndDoubles(
+      ['R', 'R', 'L', 'L'],
+      // Big gap between the second R and the first L.
+      [0.000, 0.060, 0.500, 0.560],
+      TOLERANCE,
+    )).toEqual(['R2', 'L2']);
+  });
+});
+
+describe('collapseSlicesAndDoubles — non-slice + edge cases', () => {
+  it('passes through ordinary moves untouched', () => {
+    expect(collapseSlicesAndDoubles(['R', 'U', "R'", "U'"], [0, 1, 2, 3], TOLERANCE))
+      .toEqual(['R', 'U', "R'", "U'"]);
+  });
+
+  it('still collapses adjacent same-face quarter-turns into a half-turn', () => {
+    expect(collapseSlicesAndDoubles(['R', 'R'], [0, 0.05], TOLERANCE))
+      .toEqual(['R2']);
+  });
+
+  it('handles E and S slices the same way', () => {
+    expect(collapseSlicesAndDoubles(["D'", 'U'], [0, 0.01], TOLERANCE)).toEqual(['E']);
+    expect(collapseSlicesAndDoubles(["F'", 'B'], [0, 0.01], TOLERANCE)).toEqual(['S']);
+  });
+
+  it('empty input → empty output', () => {
+    expect(collapseSlicesAndDoubles([], [], TOLERANCE)).toEqual([]);
+  });
+
+  it('single move passes through', () => {
+    expect(collapseSlicesAndDoubles(['R'], [0], TOLERANCE)).toEqual(['R']);
   });
 });
 

@@ -14,7 +14,7 @@ import {
 } from './cube/predicates';
 import { generateRandomScramble3x3 } from './cube/scramble';
 import { type Process, type SolveRecord } from './fullSolve/types';
-import { moveClass, collapseDoubles, parseScramble, invertMoves } from './fullSolve/moves';
+import { moveClass, collapseDoubles, collapseSlicesAndDoubles, getSliceForPair, parseScramble, invertMoves, SLICE_TOLERANCE_MS } from './fullSolve/moves';
 import { classifyMoves } from './fullSolve/classify';
 import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
@@ -764,6 +764,76 @@ function backfillRouxPairTimings() {
   }
 }
 
+// Canonical raw expansion of slice tokens. Saved slice tokens cover 2
+// raw events (the outer-face pair they were collapsed from); slice X2
+// tokens cover 4 (the doubled pair). The specific expansion direction
+// (e.g. M' → R' L vs L R') doesn't matter for re-detection because
+// SLICE_PAIR_MAP recognises both orderings. The X2 expansion uses the
+// sequential R R L L form rather than the parallel R L R L because
+// pass 1's slice detection would re-collapse the parallel form into
+// M' M' which then collapses to M2 — identical end result, but the
+// sequential form is shorter to write down here.
+const SLICE_RAW_EXPANSION: Record<string, string[]> = {
+  "M":  ["R", "L'"],
+  "M'": ["R'", "L"],
+  "M2": ["R", "R", "L", "L"],
+  "E":  ["D'", "U"],
+  "E'": ["D", "U'"],
+  "E2": ["D", "D", "U", "U"],
+  "S":  ["F'", "B"],
+  "S'": ["F", "B'"],
+  "S2": ["F", "F", "B", "B"],
+};
+
+// Slice-token backfill — re-derive each stored `solution` string with
+// slice tokens (M, M', M2, E, S, ...) using the per-record `turns`
+// array. Idempotent: records already containing slice tokens produce
+// identical output and are left alone. Records without `turns` data
+// (very old exports) are skipped. Runs at init + after JSON import,
+// same pattern as backfillF2lSplits.
+function backfillSliceTokens() {
+  let updated = 0;
+  for (const r of history) {
+    if (!r.turns || r.turns.length === 0) continue;
+    if (!r.solution) continue;
+    // Re-expand the saved solution to its raw quarter-turn stream.
+    // Plain quarter-turns are 1 event; outer-face X2 tokens are 2;
+    // SLICE tokens (already-collapsed at save time) cover 2 raw events
+    // each (e.g. M' was originally R' + L), and slice X2 tokens cover
+    // 4. The canonical expansions below produce raw streams that
+    // collapseSlicesAndDoubles re-recognises, so re-running the
+    // backfill on the same record is idempotent.
+    const tokens = r.solution.split(/\s+/).filter(Boolean);
+    const raw: string[] = [];
+    for (const t of tokens) {
+      const expanded = SLICE_RAW_EXPANSION[t];
+      if (expanded) {
+        for (const m of expanded) raw.push(m);
+      } else if (t.endsWith('2') && /^[UDLRFB]2$/.test(t)) {
+        // R2 → R + R (canonical), etc.
+        raw.push(t.slice(0, -1), t.slice(0, -1));
+      } else {
+        raw.push(t);
+      }
+    }
+    if (raw.length !== r.turns.length) {
+      // Token count doesn't line up with raw turns count — could be a
+      // legacy record predating the doubles invariant. Skip rather
+      // than risk emitting a wrong solution.
+      continue;
+    }
+    const recollapsed = collapseSlicesAndDoubles(raw, r.turns, SLICE_TOLERANCE_MS).join(' ');
+    if (recollapsed !== r.solution) {
+      r.solution = recollapsed;
+      updated++;
+    }
+  }
+  if (updated > 0) {
+    console.log(`[history] slice-backfill: rewrote ${updated} solution${updated === 1 ? '' : 's'} with slice tokens.`);
+    void saveHistory();
+  }
+}
+
 function importHistoryFromText(text: string) {
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { alert('Import failed: invalid JSON.'); return; }
@@ -776,6 +846,7 @@ function importHistoryFromText(text: string) {
   // the F2L-slots toggle has data to show.
   backfillF2lSplits();
   backfillRouxPairTimings();
+  backfillSliceTokens();
   renderGraph();
   renderStatsBoxes();
   renderStatsLegend();
@@ -1373,14 +1444,14 @@ const fsGraphF2lSplitsEl = () => $$<HTMLInputElement>('fs-graph-f2l-splits');
 let kpuzzle: KPuzzle | null = null;
 let lastPattern: KPattern | null = null;   // most recent pattern from twistyTracker
 let myPattern: KPattern | null = null;     // internally-maintained; applyMove on each physical move
-cube3x3x3.kpuzzle().then(kp => {
+// Resolves once the cube engine is ready. initFullSolve() awaits this
+// AFTER awaiting initHistoryStorage(), then runs the backfills — both
+// inputs need to be ready or the backfills run over an empty history
+// and silently no-op (race that previously meant backfills only worked
+// in the rare order kpuzzle-after-history).
+const kpuzzleReady: Promise<KPuzzle> = cube3x3x3.kpuzzle().then(kp => {
   kpuzzle = kp;
-  // Records made between the turn-timestamps feature and the F2L-slots
-  // feature have `turns` but no `f2lSplits`. Replay them now that we have
-  // the kpuzzle, so the F2L-slots toggle visualises every applicable
-  // historical solve uniformly.
-  backfillF2lSplits();
-  backfillRouxPairTimings();
+  return kp;
 });
 
 let mode: Mode = 'idle';
@@ -1923,6 +1994,30 @@ function renderStatus(text: string) {
   if (el) el.textContent = text;
 }
 
+// Buffer-and-decide for the LIVE solution display: when the very last
+// move just arrived (< SLICE_TOLERANCE_MS ago) and hasn't yet completed
+// a slice with the prior move, hide it from the display until either
+// (a) the next move arrives and either completes the slice or pushes
+//     the old one out of the pending window, or
+// (b) SLICE_TOLERANCE_MS elapses and the timer below re-renders it as
+//     a standalone.
+// This avoids the flicker that fire-and-rewrite would produce when an
+// R' briefly shows before getting replaced by M' on the L's arrival.
+let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePendingFlush(delayMs: number) {
+  if (pendingFlushTimer !== null) clearTimeout(pendingFlushTimer);
+  pendingFlushTimer = setTimeout(() => {
+    pendingFlushTimer = null;
+    renderSolutionMoves();
+  }, Math.max(10, delayMs));
+}
+function cancelPendingFlush() {
+  if (pendingFlushTimer !== null) {
+    clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = null;
+  }
+}
+
 function renderSolutionMoves() {
   const el = fsSolutionMovesEl();
   if (!el) return;
@@ -1930,7 +2025,33 @@ function renderSolutionMoves() {
     renderPausedSolveMoves(el);
     return;
   }
-  setFormattedMoves(el, collapseDoubles(solveMoves).join(' '));
+  const n = solveMoves.length;
+  let displayMoves = solveMoves;
+  let displayTurns = solveTurns;
+  if (n >= 1) {
+    const lastSec = solveTurns[n - 1];
+    const lastWallMs = solveStartMs + pausedAccumMs + lastSec * 1000;
+    const elapsed = Date.now() - lastWallMs;
+    // "Pending" iff the last move arrived inside the slice tolerance
+    // window AND it didn't complete a slice with the prior move.
+    let completedSlice = false;
+    if (n >= 2) {
+      const gapMs = (lastSec - solveTurns[n - 2]) * 1000;
+      if (gapMs <= SLICE_TOLERANCE_MS) {
+        completedSlice = getSliceForPair(solveMoves[n - 2], solveMoves[n - 1]) !== null;
+      }
+    }
+    if (elapsed < SLICE_TOLERANCE_MS && !completedSlice) {
+      displayMoves = solveMoves.slice(0, -1);
+      displayTurns = solveTurns.slice(0, -1);
+      schedulePendingFlush(SLICE_TOLERANCE_MS - elapsed);
+    } else {
+      cancelPendingFlush();
+    }
+  } else {
+    cancelPendingFlush();
+  }
+  setFormattedMoves(el, collapseSlicesAndDoubles(displayMoves, displayTurns, SLICE_TOLERANCE_MS).join(' '));
 }
 
 // During pause, render the snapshotted original-move list as individual
@@ -5326,6 +5447,15 @@ export async function initFullSolve() {
   // off the first render passes, so the graph and stats reflect the
   // user's full record from frame 1.
   await initHistoryStorage();
+  // Then wait for the kpuzzle so backfills can replay moves. Running
+  // these here (instead of inside the kpuzzle().then) means BOTH
+  // history-load and kpuzzle-ready have happened, so the backfills
+  // actually find records to operate on rather than no-op'ing on an
+  // empty history.
+  await kpuzzleReady;
+  backfillF2lSplits();
+  backfillRouxPairTimings();
+  backfillSliceTokens();
   wireEvents();
   wireGraphScrollbarDrag();
   applyPrefsToUI();
