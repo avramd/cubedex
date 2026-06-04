@@ -5,7 +5,7 @@ import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
-import { COPY_ICON } from './icons';
+import { COPY_ICON, SHARE_IN_SVG, SHARE_OUT_SVG } from './icons';
 import { startReplay } from './replay';
 import { type Face, FACES, OPPOSITE, faceStickers, isSolved } from './cube/facelets';
 import {
@@ -20,6 +20,7 @@ import { moveClass, collapseDoubles, collapseSlicesAndDoubles, getSliceForPair, 
 import { classifyMoves } from './fullSolve/classify';
 import { PHASE_KEY_LABELS, phaseMsForDisplay } from './fullSolve/aggregate';
 import { mergeImportedHistory as mergeHistoryPure } from './fullSolve/historyMerge';
+import { type SolveShare, formatShareText, parseShareText } from './fullSolve/share';
 import {
   classifyPauseMove, computePauseReversePath, isPauseMoveClickable,
   computeRedundantBlocks, isRedundantIdx,
@@ -1398,6 +1399,7 @@ const fsPauseBtnEl = () => $$<HTMLButtonElement>('fs-pause-btn');
 const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
 const fsRecordBtnEl = () => $$<HTMLButtonElement>('fs-record-btn');
+const fsReceiveShareBtnEl = () => $$<HTMLButtonElement>('fs-receive-share-btn');
 const fsCopyScrambleBtnEl = () => $$<HTMLButtonElement>('fs-copy-scramble-btn');
 const fsPasteScrambleBtnEl = () => $$<HTMLButtonElement>('fs-paste-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
@@ -1469,6 +1471,13 @@ let mode: Mode = 'idle';
 let cubeConnected = false;
 let cubeIsSolved = false;
 let pendingScramble: string | null = null;  // set by 🎯 install-as-next
+// When true, the active solve was injected from a clipboard share, not
+// performed by the user. finishSolve's history.push is gated on this
+// being false so the receiver doesn't accumulate fake solves; every
+// other code path runs normally (the receiver still gets the pause-
+// mode walkthrough, the timer display, the completion banner, etc.).
+// Cleared by resetSolveState() and at the top of newScramble().
+let externalSolveActive = false;
 // "Share scrambles" peer state. Set by index.ts via setShareScramblesState.
 // `sharingScrambles` = this peer is broadcasting. `peerSharingScrambles` =
 // the partner is broadcasting (so our switch is greyed out). `onLocalScrambleChange`
@@ -2219,6 +2228,7 @@ async function newScramble(opts?: { restore?: boolean }) {
 
 function resetSolveState() {
   mode = 'idle';
+  externalSolveActive = false;
   cancelAnimationFrame(timerRafHandle);
   if (inspectionTimeoutHandle !== null) {
     clearTimeout(inspectionTimeoutHandle);
@@ -2262,6 +2272,91 @@ function resetSolveState() {
   renderSolutionMoves();
   renderRetraceHint();
   updateRecordButton();
+}
+
+// Inject a clipboard-received share into the live solve flow as if the
+// receiver had executed this scramble, performed this solve, paused at
+// the last move, then scrubbed all the way back to the start. From the
+// resulting state every existing pause-mode code path (forward
+// classification of physical moves, click-to-rewind, retrace hints,
+// finishSolve) Just Works — and the `externalSolveActive` flag keeps
+// finishSolve's `history.push` from persisting anything.
+function loadExternalSolveAsPaused(share: SolveShare) {
+  if (!kpuzzle) {
+    renderStatus('Cube engine not loaded yet — try again in a moment.');
+    return;
+  }
+  const solutionMoves = share.solution.split(/\s+/).filter(Boolean);
+  if (solutionMoves.length === 0) {
+    renderStatus('Shared solve has no moves.');
+    return;
+  }
+  // Pre-roll the scramble + solution to verify every token is
+  // applyable; reject the share before mutating state otherwise.
+  const start = kpuzzle.defaultPattern();
+  const scrambleMovesList = share.scramble.trim().split(/\s+/).filter(Boolean);
+  let scrambledPattern: KPattern = start;
+  let finalPattern: KPattern = start;
+  try {
+    for (const m of scrambleMovesList) scrambledPattern = scrambledPattern.applyMove(m);
+    finalPattern = scrambledPattern;
+    for (const m of solutionMoves) finalPattern = finalPattern.applyMove(m);
+  } catch {
+    renderStatus('Shared solve contained an unrecognised move.');
+    return;
+  }
+  // Clean slate, then arm the external-solve guard before populating
+  // anything (resetSolveState clears the flag, so the order matters).
+  resetSolveState();
+  externalSolveActive = true;
+  // Scramble bookkeeping — same shape newScramble() produces, so the
+  // scramble display + abort + target-from-history all behave normally.
+  currentScramble = share.scramble;
+  const pre = precomputeScramblePatterns(share.scramble, start);
+  scrambleMoves = pre.moves;
+  scramblePatternStack = pre.patterns;
+  scrambleHalfwayStates = pre.halfwayStates;
+  scrambleProgress = pre.moves.length;
+  scrambleTargetFacelets = pre.patterns[pre.patterns.length - 1] || null;
+  // Solve state — synthesise as if the receiver played the whole
+  // solution. computeOriginalStates inside togglePause will rewind
+  // myPattern through inverse moves to fill pauseState.originalStates,
+  // so myPattern must be the FINAL (= solved) pattern at the moment
+  // togglePause runs.
+  myPattern = finalPattern;
+  solveStartMs = Date.now();
+  solveEndMs = 0;
+  pausedAccumMs = 0;
+  solveMoves = solutionMoves.slice();
+  if (share.turns && share.turns.length >= solutionMoves.length) {
+    solveTurns = share.turns.slice(0, solutionMoves.length);
+  } else {
+    // No timing in the share — fall back to 1s/move so downstream code
+    // that expects parallel arrays doesn't trip. Pause-mode doesn't
+    // surface these numerically.
+    solveTurns = solutionMoves.map((_, i) => i + 1);
+  }
+  phaseSeq = currentPhaseSequence();
+  phaseTimestamps = phaseSeq.map(() => null);
+  phaseReachedAtMoveIdx = phaseSeq.map(() => -1);
+  // Briefly enter 'solving' so togglePause takes the pause-entry
+  // branch and builds pauseState with the right snapshot.
+  mode = 'solving';
+  togglePause();
+  // Scrub the frontier back to "before the first move" so the cube +
+  // solution panel start at the scrambled state. The receiver can
+  // physically step forward through the solution from here, and the
+  // existing pause-mode logic classifies each move against
+  // pauseState.originalStates[frontier + 1].
+  pauseState.frontier = -1;
+  pauseState.wayward = [];
+  pauseState.redoneSet = new Set<number>();
+  pauseState.targetIdx = null;
+  myPattern = scrambledPattern;
+  renderScrambleDisplay();
+  renderSolutionMoves();
+  renderRetraceHint();
+  renderStatus(`Received shared solve — ${solutionMoves.length} moves. Step forward to walk through it.`);
 }
 
 // ---------- Record mode (ad-hoc algorithm capture) ----------
@@ -2831,6 +2926,11 @@ function finishSolve() {
         ? { tags: prefs.pendingSolveTags.slice() }
         : {}),
   };
+  // External-solve guard: when the active solve was injected from a
+  // clipboard share, finishSolve still runs end-to-end so the UI shows
+  // a completion banner, but we don't persist anything — the share
+  // isn't the receiver's solve.
+  if (externalSolveActive) return;
   history.push(record);
   // New solve lands — snap the graph window back to the latest entry
   // so the user sees their fresh result, regardless of where they were
@@ -4689,6 +4789,38 @@ function renderSolveList() {
     });
     actions.appendChild(replayBtn);
 
+    // Share button: copy scramble + solution (+ turns when present) to
+    // the clipboard in a format another Cubedex user can paste back in
+    // via the receive button.
+    const shareBtn = document.createElement('button');
+    shareBtn.className = iconBtnClass;
+    shareBtn.innerHTML = SHARE_OUT_SVG;
+    shareBtn.title = hasSolution
+      ? 'Share this solve to clipboard (⌥-click to include per-move timings)'
+      : 'No solution to share';
+    shareBtn.disabled = !hasSolution;
+    shareBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      // Default omits timings to keep the payload light. Opt-click
+      // (⌥ on Mac, Alt on Windows/Linux) includes them so the
+      // receiver can analyse inter-move pacing.
+      const includeTurns = e.altKey && !!r.turns && r.turns.length > 0;
+      const share: SolveShare = {
+        scramble: r.scramble,
+        solution: r.solution!,
+        ...(includeTurns ? { turns: Array.from(r.turns!) } : {}),
+      };
+      try {
+        await navigator.clipboard.writeText(formatShareText(share));
+        renderStatus(includeTurns
+          ? 'Share copied with timings — paste it anywhere to send.'
+          : 'Share copied — paste it anywhere to send.');
+      } catch {
+        renderStatus('Clipboard write denied. Allow clipboard access to share.');
+      }
+    });
+    actions.appendChild(shareBtn);
+
     const copyBtn = document.createElement('button');
     copyBtn.className = `${iconBtnClass} text-base`;
     copyBtn.textContent = COPY_ICON;
@@ -4966,6 +5098,29 @@ function wireEvents() {
     if (!last || !last.solution) return;
     startReplay(last);
   });
+
+  // Plug the receive-share button's icon in once at wire time; reading
+  // the clipboard inside the click handler counts as a user gesture
+  // (required by every modern browser).
+  const fsReceiveShareBtn = fsReceiveShareBtnEl();
+  if (fsReceiveShareBtn) {
+    fsReceiveShareBtn.innerHTML = SHARE_IN_SVG;
+    fsReceiveShareBtn.addEventListener('click', async () => {
+      let text = '';
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        renderStatus('Clipboard access denied. Allow clipboard read in your browser settings.');
+        return;
+      }
+      const share = parseShareText(text);
+      if (!share) {
+        renderStatus('No Cubedex share found in the clipboard.');
+        return;
+      }
+      loadExternalSolveAsPaused(share);
+    });
+  }
 
   fsRecordBtnEl()?.addEventListener('click', () => {
     if (mode === 'recording') stopRecording();
