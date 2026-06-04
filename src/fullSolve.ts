@@ -1,4 +1,6 @@
 import { Alg } from 'cubing/alg';
+import min2phase from './lib/min2phase.js';
+import { fixOrientation } from './functions';
 import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
 import { Chart, registerables } from 'chart.js';
@@ -96,7 +98,7 @@ interface PhaseDef {
   color: string;
 }
 
-type Mode = 'idle' | 'scrambling' | 'inspection' | 'solving' | 'paused' | 'done';
+type Mode = 'idle' | 'scrambling' | 'inspection' | 'solving' | 'paused' | 'done' | 'recording';
 
 // ---------- Prefs ----------
 
@@ -362,6 +364,7 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
   // so per-slot timing isn't meaningful for them.
   if (r.process === 'beginner') return null;
   if (r.process === 'roux' || r.process === 'f3ul') return null;
+  if (r.process === 'record') return null;  // No phases to recompute.
   if (!r.turns || r.turns.length === 0) return null;
   let p = kpuzzle.defaultPattern();
   for (const m of r.scramble.split(/\s+/).filter(Boolean)) {
@@ -479,6 +482,9 @@ function recomputeMissingSplitsFor(r: SolveRecord): ReplayDerived | null {
 // absent from the returned map — the graph + CSV handle missing
 // keys as zero.
 function replayPhasesForProcess(r: SolveRecord, targetProcess: Process): Record<string, number> | null {
+  // 'record' is a phaseless pseudo-process. Transmuting a real solve
+  // to record just drops its phase data.
+  if (targetProcess === 'record') return {};
   if (!kpuzzle) return null;
   if (!r.turns || r.turns.length === 0) return null;
   let pat = kpuzzle.defaultPattern();
@@ -1032,6 +1038,7 @@ export const PHASE_COLORS = [
 // influence how the bands are drawn after the fact. Use displayPhaseSequence
 // for legend / graph rendering.
 function currentPhaseSequence(): PhaseDef[] {
+  if (prefs.process === 'record') return [];
   if (prefs.process === 'beginner') {
     // Until beginner intermediate phases are defined, track 2 buckets:
     // everything up to yellow-cross, and yellow-cross → solved.
@@ -1107,6 +1114,7 @@ const CANONICAL_KEY_ORDER: readonly string[] = [
 // uniformly. Roux records honor twoLookCmll/threeLookLse; CFOP/F3uL
 // records honor twoLookOll/twoLookPll.
 function displayPhaseSequenceFor(r: SolveRecord): string[] {
+  if (r.process === 'record') return [];
   if (r.process === 'beginner') return ['setup', 'll'];
   // Roux/F3uL block-stage key choice depends on (a) whether the record
   // has the granular per-pair data and (b) the active color scheme.
@@ -1168,6 +1176,7 @@ function displayPhaseSequenceFor(r: SolveRecord): string[] {
 //     oll/pll (and 2-look splits). Roux's CMLL/LSE keys remain
 //     distinct since they don't correspond to OLL/PLL.
 function chartSlotSequenceFor(r: SolveRecord): string[] {
+  if (r.process === 'record') return [];
   if (r.process === 'beginner') return ['setup', 'll'];
   const hasGranular = !!r.rouxPairTimingsMs && r.rouxPairTimingsMs.length >= 4;
   const hasScheme1 = typeof r.rouxBlock1FirstPairMs === 'number'
@@ -1195,6 +1204,7 @@ function chartSlotSequenceFor(r: SolveRecord): string[] {
 // early/middle slots, picks the right stored phase per (process,
 // scheme).
 function chartSlotMs(r: SolveRecord, slot: string): number {
+  if (r.process === 'record') return 0;
   const p = r.phases || {};
   // ----- Early phase -----
   if (slot === 'cross_1' || slot === 'cross_2' || slot === 'cross_3' || slot === 'cross_4') {
@@ -1387,6 +1397,7 @@ const fsRetraceHintEl = () => $$('fs-retrace-hint');
 const fsPauseBtnEl = () => $$<HTMLButtonElement>('fs-pause-btn');
 const fsAbortBtnEl = () => $$<HTMLButtonElement>('fs-abort-btn');
 const fsNewScrambleBtnEl = () => $$<HTMLButtonElement>('fs-new-scramble-btn');
+const fsRecordBtnEl = () => $$<HTMLButtonElement>('fs-record-btn');
 const fsCopyScrambleBtnEl = () => $$<HTMLButtonElement>('fs-copy-scramble-btn');
 const fsPasteScrambleBtnEl = () => $$<HTMLButtonElement>('fs-paste-scramble-btn');
 const fsSolveListEl = () => $$('fs-solve-list');
@@ -1691,6 +1702,8 @@ function applyFullSolveMode() {
     const metaEl = algNameDisplay2MetaEl();
     if (metaEl) metaEl.textContent = '';
   }
+  // FS-toggle changes affect Record-button availability.
+  updateRecordButton();
 }
 
 const TRAINING_STATS_LEGEND_HTML = `
@@ -2240,6 +2253,7 @@ function resetSolveState() {
   };
   pauseOriginalTurns = [];
   pauseOriginalPhaseReached = [];
+  recordingStartFacelets = null;
   const pauseBtn = fsPauseBtnEl();
   if (pauseBtn) { pauseBtn.disabled = true; pauseBtn.textContent = 'Pause'; }
   const abortBtn = fsAbortBtnEl();
@@ -2247,6 +2261,158 @@ function resetSolveState() {
   renderTimer();
   renderSolutionMoves();
   renderRetraceHint();
+  updateRecordButton();
+}
+
+// ---------- Record mode (ad-hoc algorithm capture) ----------
+
+// Facelets snapshot of myPattern at recording-start. Used at stop time
+// to reverse-engineer a scramble (= moves that take a solved cube to
+// this starting state) via min2phase.
+let recordingStartFacelets: string | null = null;
+
+// Recording can replace any "between things" state — including an
+// active scramble or a done solve — but never interrupt a live solve
+// (inspection / solving / paused) since that would lose the user's
+// in-progress run.
+const RECORD_ALLOWED_MODES: ReadonlySet<Mode> = new Set(['idle', 'scrambling', 'done']);
+
+function startRecording() {
+  if (!prefs.enabled) {
+    renderStatus('Enable Full Solve mode to record.');
+    return;
+  }
+  if (!cubeConnected || !myPattern) {
+    renderStatus('Connect a smart cube before recording.');
+    return;
+  }
+  if (!RECORD_ALLOWED_MODES.has(mode)) {
+    renderStatus('Finish or abort the current solve before recording.');
+    return;
+  }
+  // Snapshot to a local first — resetSolveState() below clears
+  // recordingStartFacelets, so we have to grab the facelets before it
+  // and assign after.
+  let startFacelets: string;
+  try { startFacelets = patternToFacelets(myPattern); }
+  catch { renderStatus('Could not read cube state to start recording.'); return; }
+  resetSolveState();          // wipe any stale solve data (incl. recordingStartFacelets)
+  recordingStartFacelets = startFacelets;
+  mode = 'recording';
+  solveStartMs = Date.now();
+  pausedAccumMs = 0;
+  solveMoves = [];
+  solveTurns = [];
+  updateRecordButton();
+  // Disable the 🔀 new-scramble button so it doesn't blow away the
+  // recording mid-capture. Re-enabled in stopRecording / resetSolveState.
+  const newScrambleBtn = fsNewScrambleBtnEl();
+  if (newScrambleBtn) newScrambleBtn.disabled = true;
+  renderStatus('Recording — click ⏹ to stop.');
+}
+
+// Wraps min2phase.solve() with a defensive cap on solver effort. The
+// smartcube only reports states reachable by its own move history, so
+// min2phase should converge in milliseconds in normal use; this just
+// keeps a weird input from pegging the CPU.
+function solveFaceletsBounded(facelets: string): string | null {
+  try {
+    // Use the convenience `solve()` — it's what the three existing
+    // call sites in index.ts use and is known to work reliably with
+    // patternToFacelets(fixOrientation(...)). Empty string is a VALID
+    // result meaning "already solved" (the receiver's scramble would
+    // also be empty).
+    const sol = min2phase.solve(facelets);
+    if (typeof sol !== 'string' || sol.startsWith('Error')) {
+      console.warn('[record] min2phase.solve returned', JSON.stringify(sol),
+                   'for facelets', facelets);
+      return null;
+    }
+    return sol;
+  } catch (e) {
+    console.warn('[record] min2phase.solve threw', e, 'for facelets', facelets);
+    return null;
+  }
+}
+
+function stopRecording() {
+  if (mode !== 'recording') return;
+  if (!recordingStartFacelets) {
+    renderStatus('Recording start state was lost — discarded.');
+    resetSolveState();
+    return;
+  }
+  if (solveMoves.length === 0) {
+    renderStatus('No moves captured — discarded.');
+    recordingStartFacelets = null;
+    resetSolveState();
+    updateRecordButton();
+    const nb = fsNewScrambleBtnEl(); if (nb) nb.disabled = false;
+    return;
+  }
+  // Re-orient to canonical (white-on-top etc.) before passing to the
+  // solver — `solve()` expects the standard facelet layout.
+  let canonicalFacelets = recordingStartFacelets;
+  if (myPattern) {
+    try {
+      // Build a pattern reflecting the START state by walking the
+      // solution moves backwards from the current `myPattern`.
+      let pat = myPattern;
+      for (let i = solveMoves.length - 1; i >= 0; i--) {
+        pat = pat.applyMove(invertMoveTok(solveMoves[i]));
+      }
+      canonicalFacelets = patternToFacelets(fixOrientation(pat));
+    } catch { /* fall through to raw recordingStartFacelets */ }
+  }
+  const solvedFromStart = solveFaceletsBounded(canonicalFacelets);
+  if (solvedFromStart === null) {
+    renderStatus('Could not derive a scramble from the recording start state.');
+    return;
+  }
+  // solvedFromStart takes startState → solved; inverting it gives
+  // solved → startState, which is the scramble we want.
+  const solveTokens = solvedFromStart.trim().split(/\s+/).filter(Boolean);
+  const reverseScramble = invertMoves(solveTokens).join(' ');
+  const record: SolveRecord = {
+    ts: Date.now(),
+    scramble: reverseScramble,
+    solution: collapseSlicesAndDoubles(solveMoves, solveTurns, SLICE_TOLERANCE_MS).join(' '),
+    totalMs: Date.now() - solveStartMs,
+    phases: {},
+    process: 'record',
+    turns: solveTurns.slice(),
+    // 2-look prefs don't apply to recordings (no phases to split), but
+    // the SolveRecord schema requires them; carry the user's current
+    // prefs so an edit-dialog transmute to CFOP/Roux/F3uL would honour
+    // their existing setting.
+    twoLookOll: prefs.twoLookOll,
+    twoLookPll: prefs.twoLookPll,
+  };
+  history.push(record);
+  void saveHistory();
+  renderSolveList();
+  renderReplayScrambleBtn();
+  // Capture the count BEFORE resetSolveState clears solveMoves.
+  const recordedCount = record.solution.split(/\s+/).filter(Boolean).length;
+  recordingStartFacelets = null;
+  resetSolveState();
+  updateRecordButton();
+  const nb = fsNewScrambleBtnEl(); if (nb) nb.disabled = false;
+  renderStatus(`Recorded ${recordedCount} move${recordedCount === 1 ? '' : 's'}.`);
+}
+
+function updateRecordButton() {
+  const btn = fsRecordBtnEl();
+  if (!btn) return;
+  if (mode === 'recording') {
+    btn.textContent = '⏹';
+    btn.title = 'Stop recording.';
+    btn.disabled = false;
+  } else {
+    btn.textContent = '⏺';
+    btn.title = 'Record an algorithm from your cube. Captures moves until you click stop.';
+    btn.disabled = !RECORD_ALLOWED_MODES.has(mode) || !cubeConnected || !prefs.enabled;
+  }
 }
 
 function abortSolve() {
@@ -2373,6 +2539,7 @@ function resolveScrambleProgressFromPattern(facelets: string) {
 function onScrambleComplete() {
   if (mode !== 'scrambling') return;
   mode = 'inspection';
+  updateRecordButton();
   inspectionStartMs = Date.now();
   deviationMoves = [];
   const abortBtn = fsAbortBtnEl();
@@ -2399,6 +2566,7 @@ function onScrambleComplete() {
 
 function startSolving() {
   mode = 'solving';
+  updateRecordButton();
   solveStartMs = Date.now();
   pausedAccumMs = 0;
   const untimed = prefs.inspection === 'none';
@@ -2587,6 +2755,7 @@ function evaluatePhaseTransitions(facelets: string) {
 function finishSolve() {
   if (mode !== 'solving') return;
   mode = 'done';
+  updateRecordButton();
   solveEndMs = Date.now();
   // The scramble has been solved — no longer "unsolved", so drop the
   // persisted active scramble. The next auto-newScramble will generate
@@ -2698,6 +2867,7 @@ function finishSolve() {
 function togglePause() {
   if (mode === 'solving') {
     mode = 'paused';
+    updateRecordButton();
     pauseStartedAtMs = Date.now();
     cancelAnimationFrame(timerRafHandle);
     // Snapshot the solve. The state list is computed by REWINDING the
@@ -2726,6 +2896,7 @@ function togglePause() {
     pausedAccumMs += Date.now() - pauseStartedAtMs;
     pauseStartedAtMs = 0;
     mode = 'solving';
+    updateRecordButton();
     reconcileSolveAfterPause();
     // Drop the snapshot now that we've rebuilt the live state.
     pauseState = {
@@ -4796,6 +4967,16 @@ function wireEvents() {
     startReplay(last);
   });
 
+  fsRecordBtnEl()?.addEventListener('click', () => {
+    if (mode === 'recording') stopRecording();
+    else startRecording();
+  });
+  // Initial state of the Record button — disabled until cube + FS are
+  // both ready. wireEvents runs at init; cube-connected / FS-enabled
+  // transitions refresh via updateRecordButton calls in applyPrefsToUI
+  // / fsSetCubeConnected.
+  updateRecordButton();
+
   fsTagsFilterMenuEl()?.addEventListener('change', () => {
     const sel = fsTagsFilterMenuEl();
     if (!sel) return;
@@ -4922,7 +5103,12 @@ function applyPrefsToUI() {
 // (graph, stats boxes, legend, etc.). Calling this through the
 // renderers keeps the displayed view internally consistent.
 function filteredHistory(): SolveRecord[] {
-  return applyTagFilter(history, prefs.graphTagFilter);
+  // 'record' is a pseudo-process; recordings never enter the multi-
+  // solve graph or stats aggregates so they can't pollute averages.
+  // They remain visible in the solve list (rendered there from the
+  // raw `history` array, not via this function).
+  return applyTagFilter(history, prefs.graphTagFilter)
+    .filter(r => r.process !== 'record');
 }
 
 // Trigger every renderer that reads from history. Used after a tag
@@ -5528,6 +5714,11 @@ export function fsOnPhysicalMove(move: string) {
     // turned — let the pause state machine classify the move (reverse /
     // redo / wayward) and re-render the investigation surface.
     onSolveMove(move);
+  } else if (mode === 'recording') {
+    // Free-form recording: append every move with a relative timestamp.
+    // No phase tracking; that happens (or doesn't) when the record is
+    // optionally transmuted to a real process via the edit dialog.
+    onSolveMove(move);
   }
 }
 
@@ -5571,11 +5762,12 @@ export function fsSetCubeConnected(connected: boolean) {
     // time the user opens the app.
     void newScramble({ restore: true });
   }
-  if (!connected && (mode === 'scrambling' || mode === 'inspection' || mode === 'solving' || mode === 'paused')) {
+  if (!connected && (mode === 'scrambling' || mode === 'inspection' || mode === 'solving' || mode === 'paused' || mode === 'recording')) {
     // Cube disconnected mid-flow; abort and return to idle. The status
     // line shows the "Connect a smart cube…" banner via updateCubeGate.
     resetSolveState();
   }
+  updateRecordButton();
 }
 
 export function isFullSolveModeEnabled(): boolean {

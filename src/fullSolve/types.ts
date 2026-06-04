@@ -26,7 +26,13 @@
 //   - If it's derivable from existing fields: extend recomputeMissingSplitsFor
 //     in fullSolve.ts so old exports can be imported and re-derive it.
 
-export type Process = 'cfop' | 'beginner' | 'roux' | 'f3ul';
+// 'record' is a pseudo-process for ad-hoc move recordings — see
+// startRecording / stopRecording in fullSolve.ts. It has no phases or
+// per-process logic; the multi-solve history graph filters records
+// out so they don't pollute averages, but they still render in the
+// solve list (so they can be replayed, shared, edited, or transmuted
+// to a real process via the edit dialog).
+export type Process = 'cfop' | 'beginner' | 'roux' | 'f3ul' | 'record';
 
 export interface SolveRecord {
   ts: number;        // Unix ms

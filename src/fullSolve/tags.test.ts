@@ -194,16 +194,49 @@ describe('tagFilterLabel', () => {
 });
 
 describe('process names as virtual tags', () => {
-  it('isProcessName recognizes the 4 reserved names', () => {
+  it('isProcessName recognizes all reserved process names', () => {
     for (const p of PROCESS_NAMES) expect(isProcessName(p)).toBe(true);
     expect(isProcessName('speed')).toBe(false);
     expect(isProcessName('')).toBe(false);
     expect(isProcessName('CFOP')).toBe(false);  // already-normalized check, lowercase only
   });
 
-  it('PROCESS_NAMES contains the 4 known processes', () => {
+  it('PROCESS_NAMES contains every known process (incl. the record pseudo-process)', () => {
     expect([...PROCESS_NAMES].sort())
-      .toEqual(['beginner', 'cfop', 'f3ul', 'roux']);
+      .toEqual(['beginner', 'cfop', 'f3ul', 'record', 'roux']);
+  });
+
+  it('record is reserved (so users can\'t add it as a literal tag) but is NOT exposed as a virtual tag', () => {
+    // Reserved → tag editor blocks literal "record":
+    expect(isProcessName('record')).toBe(true);
+    // But NOT virtual → a recording's process doesn't enter the
+    // include/exclude tag-filter universe:
+    const h = [
+      rec(['note'], { process: 'record' }),
+      rec(['note'], { process: 'cfop' }),
+    ];
+    const c = allTagsWithCounts(h);
+    expect(c.get('record')).toBeUndefined();  // record is NOT a virtual tag
+    expect(c.get('cfop')).toBe(1);
+    expect(c.get('note')).toBe(2);
+  });
+
+  it('applyTagFilter — including "record" matches nothing (record records don\'t expose the virtual tag)', () => {
+    const recording = rec([], { process: 'record' });
+    const cfop = rec([], { process: 'cfop' });
+    const filter: TagFilter = { include: ['record'], exclude: [] };
+    expect(applyTagFilter([recording, cfop], filter)).toEqual([]);
+  });
+
+  it('applyTagFilter — excluding "record" leaves real solves untouched (no-op for them)', () => {
+    const recording = rec([], { process: 'record' });
+    const cfop = rec([], { process: 'cfop' });
+    const filter: TagFilter = { include: [], exclude: ['record'] };
+    // Recording is NOT dropped by the exclude — it has no 'record'
+    // virtual tag to match against. Filtering recordings out of the
+    // graph is the caller's job (filteredHistory()), not the tag-filter
+    // engine's.
+    expect(applyTagFilter([recording, cfop], filter)).toEqual([recording, cfop]);
   });
 
   it('allTagsWithCounts includes each record\'s process as a virtual tag', () => {

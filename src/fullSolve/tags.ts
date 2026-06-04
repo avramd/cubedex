@@ -11,7 +11,7 @@ import type { SolveRecord, Process } from './types';
 // They can't be added as literal tags — the editor disables Add when
 // the typed value matches one of these.
 
-export const PROCESS_NAMES: readonly Process[] = ['cfop', 'roux', 'f3ul', 'beginner'];
+export const PROCESS_NAMES: readonly Process[] = ['cfop', 'roux', 'f3ul', 'beginner', 'record'];
 const PROCESS_NAME_SET: ReadonlySet<string> = new Set(PROCESS_NAMES);
 
 // True iff `s` (already-normalized) is one of the reserved process
@@ -39,7 +39,12 @@ export function normalizeTag(s: string): string | null {
 export function allTagsWithCounts(history: SolveRecord[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const r of history) {
-    if (r.process) counts.set(r.process, (counts.get(r.process) ?? 0) + 1);
+    // Mirror effectiveTags(): 'record' is not exposed as a virtual tag,
+    // so a recording's process doesn't show up in the editor / filter
+    // universe.
+    if (r.process && r.process !== 'record') {
+      counts.set(r.process, (counts.get(r.process) ?? 0) + 1);
+    }
     if (!r.tags) continue;
     for (const raw of r.tags) {
       const t = normalizeTag(raw);
@@ -79,8 +84,12 @@ export interface TagFilter {
 
 // The effective tag set a record contributes for filtering purposes:
 // its real tags plus its process name as a virtual auto-tag.
+// 'record' is a pseudo-process (free-form move recording, not a real
+// solve method) — it is NOT exposed as a virtual tag, so it can't
+// participate in include/exclude filters. The multi-solve graph
+// filters 'record' records out at a higher layer (filteredHistory()).
 function effectiveTags(r: SolveRecord): string[] {
-  if (r.process) return [...(r.tags ?? []), r.process];
+  if (r.process && r.process !== 'record') return [...(r.tags ?? []), r.process];
   return r.tags ?? [];
 }
 
