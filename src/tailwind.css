@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Sync panel F=/U= colour chits — sized to match the stats-legend
+   swatches (14×10px, 2px radius) so they read as the same kind of
+   affordance as other small colour markers in the app. */
+.sync-f-chit,
+.sync-u-chit {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  padding: 0;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  vertical-align: middle;
+  line-height: 0;
+  position: relative;
+}
+.dark .sync-f-chit,
+.dark .sync-u-chit {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.sync-f-chit-selected,
+.sync-u-chit-selected {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
+/* "Use cube's reported up" chit — empty box with a diagonal slash
+   meaning "no override." */
+.sync-u-gravity {
+  background: transparent;
+}
+.sync-u-gravity::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top right,
+    transparent calc(50% - 1px),
+    rgba(0, 0, 0, 0.6) calc(50% - 1px),
+    rgba(0, 0, 0, 0.6) calc(50% + 1px),
+    transparent calc(50% + 1px));
+}
+.dark .sync-u-gravity::after {
+  background: linear-gradient(to top right,
+    transparent calc(50% - 1px),
+    rgba(255, 255, 255, 0.7) calc(50% - 1px),
+    rgba(255, 255, 255, 0.7) calc(50% + 1px),
+    transparent calc(50% + 1px));
+}
+
 /* Custom dark mode styles */
 .dark {
   --bg-color: #1a202c;

@@ -29,7 +29,7 @@ import { faceletsToPattern, patternToFacelets } from './utils';
 import { COPY_ICON } from './icons';
 import { isSliceCandidate, getSliceForPair, SLICE_TOLERANCE_MS } from './fullSolve/moves';
 import {
-  initFullSolve, fsOnPhysicalMove, fsOnPattern, fsSetCubeConnected, fsSetConnectStatus, isFullSolveModeEnabled,
+  initFullSolve, fsOnPhysicalMove, fsOnPattern, fsOnRawGyro, fsSetCubeConnected, fsSetConnectStatus, isFullSolveModeEnabled,
 } from './fullSolve';
 import { initReplay, isReplayActive } from './replay';
 import {
@@ -134,6 +134,12 @@ if (cubeCellEl) {
     cubeCellEl!.releasePointerCapture(e.pointerId);
     (twistyPlayer as HTMLElement).style.cursor = 'grab';
     dragAnchor = null;
+    // CF-2: drag is purely view-space tweak (orientAdjust), NOT a
+    // gyro-frame update. Orientation identification (F/U declarations)
+    // and basis live entirely in the Sync ⚙️ panel + gyro stream;
+    // dragging is for "I want to see the cube differently than I'm
+    // holding it" and for compensating gyro drift, neither of which
+    // should touch basis or the detected U face.
   });
 
   cubeCellEl.addEventListener('pointercancel', () => {
@@ -399,7 +405,7 @@ async function amimateCubeOrientation() {
     if (gyroscopeEnabled && !isReplayActive()) {
       twistyScene?.quaternion.slerp(cubeQuaternion, 0.25);
     } else {
-      twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE), 0.25);
+      twistyScene?.quaternion.slerp(orientAdjust.clone().multiply(DR_LOCK_BASE).multiply(viewFRotation), 0.25);
     }
 
     twistyVantage.render();
@@ -414,25 +420,176 @@ requestAnimationFrame(amimateCubeOrientation);
 
 var basis: THREE.Quaternion | null;
 
-async function resetGyroBasis() {
-  basis = null;
-  cubeQuaternion.copy(HOME_ORIENTATION);
-  let scene = twistyScene;
-  let vantage = twistyVantage;
-  if (!scene || !vantage) {
-    const vantages = await twistyPlayer.experimentalCurrentVantages();
-    vantage = [...vantages][0];
-    if (vantage) {
-      scene = await vantage.scene.scene();
-      twistyVantage = vantage;
-      twistyScene = scene;
+// CF-2: F= and U= face mappings. The smartcube reports orientation in
+// its own internal world frame (gravity-aligned + cube-body labelled
+// axes), but the user's POV is unknown to the app. The pickers let the
+// user declare which colour is on F and U. Together they uniquely
+// orient the rest pose; the gyro tracks deltas from there.
+//
+// U= 'gravity' means "use whichever body face the cube reports as up at
+// connect time" — detected from the first gyro reading by finding the
+// body axis closest to world +Y. Once detected, the value is locked
+// (stable visuals even if the user tilts the cube mid-session). To
+// re-detect, the user clicks Sync or Reset in the panel.
+//
+// Composition: scene = orientAdjust · HOME · viewFURotation · basis · quat.
+// viewFURotation is a body-to-visual rotation derived from (F, U).
+type FColor = 'white' | 'yellow' | 'red' | 'orange' | 'green' | 'blue';
+type UColor = FColor | 'gravity';
+const F_COLORS: readonly FColor[] = ['white', 'yellow', 'red', 'orange', 'green', 'blue'];
+const U_COLORS: readonly UColor[] = ['gravity', ...F_COLORS];
+const F_FACE_KEY = 'syncFFace';
+const U_FACE_KEY = 'syncUFace';
+
+// Body-frame axis for each colour, AFTER the (qx, qz, -qy, qw) swap
+// applied in handleGyroEvent. Post-swap convention: +X=red, +Y=white,
+// +Z=green (so the default rest pose with all axes identity has green
+// at F, white on top, red on the right).
+const COLOR_TO_BODY_AXIS: Record<FColor, THREE.Vector3> = {
+  red:    new THREE.Vector3( 1,  0,  0),
+  orange: new THREE.Vector3(-1,  0,  0),
+  white:  new THREE.Vector3( 0,  1,  0),
+  yellow: new THREE.Vector3( 0, -1,  0),
+  green:  new THREE.Vector3( 0,  0,  1),
+  blue:   new THREE.Vector3( 0,  0, -1),
+};
+
+// True if two colours are on the same body axis — i.e., same colour or
+// opposite colours (which sit on opposite faces of the cube). F and U
+// must be on different axes for a valid orientation; the picker rule
+// auto-clears the other control when this happens, but
+// makeFURotation also tolerates it via a fallback to keep the visual
+// from collapsing to identity.
+function isSameAxis(a: FColor, b: FColor): boolean {
+  return Math.abs(COLOR_TO_BODY_AXIS[a].dot(COLOR_TO_BODY_AXIS[b])) > 0.001;
+}
+
+// Pick the first colour from `tryOrder` that isn't on the same axis as
+// `against`. Used to choose a fallback when F and U conflict.
+function firstNonConflicting(against: FColor, tryOrder: readonly FColor[]): FColor {
+  for (const c of tryOrder) {
+    if (c !== against && !isSameAxis(c, against)) return c;
+  }
+  return tryOrder[0];
+}
+
+// Rotation that brings body's F-axis to visual +Z (camera direction)
+// and body's U-axis to visual +Y (up). The matrix has rows (rAxis,
+// uAxis, fAxis) where rAxis = uAxis × fAxis. If F and U are on the
+// same axis (same/opposite colour) we fall back to the first adjacent
+// U so the F face still shows correctly — the picker conflict rule
+// usually prevents this, but gyro-detected U + a manual F can race
+// into the conflict state momentarily.
+function makeFURotation(fColor: FColor, uColor: FColor): THREE.Quaternion {
+  const fAxis = COLOR_TO_BODY_AXIS[fColor].clone();
+  let uAxis = COLOR_TO_BODY_AXIS[uColor].clone();
+  if (isSameAxis(fColor, uColor)) {
+    const fallback = firstNonConflicting(fColor, ['white', 'red', 'green', 'yellow', 'orange', 'blue']);
+    uAxis = COLOR_TO_BODY_AXIS[fallback].clone();
+  }
+  const rAxis = new THREE.Vector3().crossVectors(uAxis, fAxis).normalize();
+  const m = new THREE.Matrix4().makeBasis(rAxis, uAxis, fAxis);
+  m.transpose();
+  return new THREE.Quaternion().setFromRotationMatrix(m);
+}
+
+// Find which colour is currently on top, given a gyro quaternion.
+// Picks the body axis whose image under quat has the largest +Y
+// component (post-axis-swap, world +Y is the gravity-up direction).
+function determineEffectiveU(quat: THREE.Quaternion): FColor {
+  let bestColor: FColor = 'white';
+  let bestDot = -Infinity;
+  for (const color of F_COLORS) {
+    const worldDir = COLOR_TO_BODY_AXIS[color].clone().applyQuaternion(quat);
+    if (worldDir.y > bestDot) {
+      bestDot = worldDir.y;
+      bestColor = color;
     }
   }
-  if (scene) {
-    scene.quaternion.copy(HOME_ORIENTATION);
+  return bestColor;
+}
+
+function loadFFace(): FColor {
+  try {
+    const s = localStorage.getItem(F_FACE_KEY);
+    if (s && (F_COLORS as readonly string[]).includes(s)) return s as FColor;
+  } catch { /**/ }
+  return 'green';
+}
+
+function loadUFace(): UColor {
+  try {
+    const s = localStorage.getItem(U_FACE_KEY);
+    if (s && (U_COLORS as readonly string[]).includes(s)) return s as UColor;
+  } catch { /**/ }
+  return 'gravity';
+}
+
+let currentFFace: FColor = loadFFace();
+let currentUFace: UColor = loadUFace();
+// Cached "effective" U colour — equal to currentUFace when it's a
+// specific colour; computed from the gyro when currentUFace='gravity'.
+// Updated on first gyro after basis reset and on U-picker change.
+let lockedEffectiveU: FColor = currentUFace === 'gravity' ? 'white' : currentUFace;
+let viewFRotation: THREE.Quaternion = makeFURotation(currentFFace, lockedEffectiveU);
+
+function refreshViewFURotation() {
+  viewFRotation = makeFURotation(currentFFace, lockedEffectiveU);
+}
+
+function setFFace(color: FColor) {
+  currentFFace = color;
+  try { localStorage.setItem(F_FACE_KEY, color); } catch { /**/ }
+  // Conflict rule: U can't be on F's axis (same or opposite colour).
+  // If the existing U conflicts, clear it back to 'gravity' so it
+  // re-detects from the next gyro event.
+  if (currentUFace !== 'gravity' && isSameAxis(color, currentUFace)) {
+    currentUFace = 'gravity';
+    try { localStorage.setItem(U_FACE_KEY, 'gravity'); } catch { /**/ }
+    basis = null;
+    updateSyncUGridSelection();
   }
-  (vantage as any)?.scheduleRender();
-  await (vantage as any)?.render();
+  refreshViewFURotation();
+  updateSyncFGridSelection();
+}
+
+function setUFace(color: UColor) {
+  // Conflict rule: F can't be on U's axis. When U is set to a specific
+  // colour that's on F's axis, clear F to the first non-conflicting
+  // default — green first, then red etc. if green would also conflict.
+  if (color !== 'gravity' && isSameAxis(currentFFace, color)) {
+    currentFFace = firstNonConflicting(color, ['green', 'red', 'white', 'yellow', 'blue', 'orange']);
+    try { localStorage.setItem(F_FACE_KEY, currentFFace); } catch { /**/ }
+    updateSyncFGridSelection();
+  }
+  currentUFace = color;
+  try { localStorage.setItem(U_FACE_KEY, color); } catch { /**/ }
+  if (color !== 'gravity') {
+    lockedEffectiveU = color;
+  } else {
+    // Re-detect from the next gyro event by clearing basis. The
+    // handleGyroEvent flow recomputes lockedEffectiveU before setting
+    // basis when it's null.
+    basis = null;
+  }
+  refreshViewFURotation();
+  updateSyncUGridSelection();
+}
+
+function updateSyncFGridSelection() {
+  $('.sync-f-chit').each((_, el) => {
+    const chit = el as HTMLButtonElement;
+    if (chit.dataset.color === currentFFace) chit.classList.add('sync-f-chit-selected');
+    else chit.classList.remove('sync-f-chit-selected');
+  });
+}
+
+function updateSyncUGridSelection() {
+  $('.sync-u-chit').each((_, el) => {
+    const chit = el as HTMLButtonElement;
+    if (chit.dataset.color === currentUFace) chit.classList.add('sync-u-chit-selected');
+    else chit.classList.remove('sync-u-chit-selected');
+  });
 }
 
 async function handleGyroEvent(event: SmartCubeEvent) {
@@ -441,11 +598,23 @@ async function handleGyroEvent(event: SmartCubeEvent) {
       setGyroscopeUiFromSupported(true);
     }
     let { x: qx, y: qy, z: qz, w: qw } = event.quaternion;
+    // CF-3: forward the raw (pre-swap, pre-basis) quaternion to the
+    // high-res gyro recorder. No-op unless an opt-click recording is
+    // active.
+    fsOnRawGyro(event.quaternion);
     let quat = new THREE.Quaternion(qx, qz, -qy, qw).normalize();
     if (!basis) {
+      // When U='gravity', re-detect which body face is currently up
+      // from this fresh gyro reading and lock the effective U. The
+      // viewFRotation is then rebuilt before composition so the rest
+      // pose immediately reflects the cube's reported orientation.
+      if (currentUFace === 'gravity') {
+        lockedEffectiveU = determineEffectiveU(quat);
+        refreshViewFURotation();
+      }
       basis = quat.clone().conjugate();
     }
-    cubeQuaternion.copy(quat.premultiply(basis).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
+    cubeQuaternion.copy(quat.premultiply(basis).premultiply(viewFRotation).premultiply(HOME_ORIENTATION).premultiply(orientAdjust));
     if (netPeer.connected) {
       const now = Date.now();
       if (now - lastGyroNetTime >= 33) {
@@ -1402,7 +1571,23 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     if (netPeer.connected) netPeer.send({ type: 'move', move: logicalMove });
 
     if (isFullSolveModeEnabled()) {
-      fsOnPhysicalMove(logicalMove);
+      // CF-4: pass the cube's own internal timestamp (when present) so
+      // solveTurns reflects cube-clock seconds, not host-clock-with-BLE-
+      // jitter seconds. Slice/wide-turn detection collapses on this
+      // series. For paired pseudo-moves (slice detected at the index.ts
+      // buffer), use the FIRST move's cubeTimestamp so the saved time
+      // corresponds to when the user actually started the slice. AND
+      // pass the slice token (visualMove) rather than the second face
+      // turn — otherwise solveMoves would contain only one of the two
+      // face turns that comprise the slice, losing the slice notation
+      // even though twistyTracker correctly applied both layers
+      // upstream. This is the fix for the bug where the live virtual
+      // cube stayed in sync but the saved Solution: line showed face-
+      // turn pairs (e.g. R' L) instead of slice tokens (M').
+      const ts = (slicePairedFirst && slicePairedFirst.type === 'MOVE')
+        ? slicePairedFirst.cubeTimestamp
+        : (event.type === 'MOVE' ? event.cubeTimestamp : null);
+      fsOnPhysicalMove(visualMove ?? logicalMove, ts);
     }
 
     if (scrambleMode) {
@@ -1743,14 +1928,17 @@ function handleFaceletsEvent(event: SmartCubeEvent) {
   }
 }
 
-function updateHeaderResetGyroState() {
-  const headerResetGyro = $('#header-reset-gyro');
-  if (conn && gyroscopeEnabled) {
-    headerResetGyro.removeClass('hidden');
-    headerResetGyro.prop('disabled', false);
+function updateHeaderSyncBtnState() {
+  const btn = $('#header-sync-btn');
+  if (conn) {
+    btn.removeClass('hidden');
+    btn.prop('disabled', false);
   } else {
-    headerResetGyro.addClass('hidden');
-    headerResetGyro.prop('disabled', true);
+    btn.addClass('hidden');
+    btn.prop('disabled', true);
+    // Close panel if cube disconnects while it was open.
+    $('#sync-panel').addClass('hidden');
+    $('#header-sync-btn').attr('aria-expanded', 'false');
   }
 }
 
@@ -1883,37 +2071,141 @@ $('#device-info').on('click', () => {
   }
 });
 
-$('#reset-state').on('click', async () => {
-  await conn?.sendCommand({ type: "REQUEST_RESET" });
+// CF-2: Sync ⚙️ panel — replaces the standalone Sync Cube / Match Cube
+// header buttons with a single dropdown housing F=, Reset, Sync, Undo.
+
+// Snapshot of the virtual cube's facelets right before the most recent
+// Reset or Sync action. Used by Undo to restore the visible state. Note
+// that this CANNOT revert the smartcube's internal reference state —
+// after a Reset, the cube still thinks "I am solved" until physically
+// re-solved and Reset again, or until Sync is performed at a known
+// state. Undo only undoes the on-screen consequences.
+let syncUndoFacelets: string | null = null;
+
+function setSyncUndoAvailable(facelets: string | null) {
+  syncUndoFacelets = facelets;
+  $('#sync-undo-btn').prop('disabled', facelets === null);
+}
+
+async function captureFaceletsForUndo(): Promise<string | null> {
+  try {
+    const pattern = await twistyTracker.experimentalModel.currentPattern.get();
+    return patternToFacelets(pattern);
+  } catch { return null; }
+}
+
+// Re-apply a captured facelets snapshot to the visible cube + tracker.
+// Mirrors the resync path in handleFaceletsEvent so behaviour stays
+// consistent across all three entry points (initial connect, Sync
+// button, Undo).
+function applyFaceletsSnapshot(facelets: string) {
+  sliceOrientation = { ...IDENTITY };
+  let setupAlg = '';
+  if (facelets !== SOLVED_STATE) {
+    const kpattern = faceletsToPattern(facelets);
+    const solution = solutionAlgFrom333Pattern(kpattern);
+    setupAlg = solution ? solution.invert().toString() : '';
+  }
+  twistyTracker.alg = setupAlg;
+  setTwistyAlg(setupAlg);
+  appliedPhysicalMoves = [];
+  applyWhiteOnBottomState({ persist: false });
+}
+
+// Toggle the panel open/closed. Click outside dismisses (handler below).
+$('#header-sync-btn').on('click', (e) => {
+  e.stopPropagation();
+  const panel = $('#sync-panel');
+  const isOpen = !panel.hasClass('hidden');
+  if (isOpen) {
+    panel.addClass('hidden');
+    $('#header-sync-btn').attr('aria-expanded', 'false');
+  } else {
+    panel.removeClass('hidden');
+    $('#header-sync-btn').attr('aria-expanded', 'true');
+    updateSyncFGridSelection();
+  }
+});
+
+// Click-outside dismissal. Bound at document level; ignores clicks
+// inside the panel or on the toggle button itself.
+$(document).on('click', (e) => {
+  const target = e.target as unknown as HTMLElement;
+  if (!target || typeof target.closest !== 'function') return;
+  if (target.closest('#sync-panel') || target.closest('#header-sync-btn')) return;
+  if (!$('#sync-panel').hasClass('hidden')) {
+    $('#sync-panel').addClass('hidden');
+    $('#header-sync-btn').attr('aria-expanded', 'false');
+  }
+});
+
+// F= colour row — clicking a chit sets that colour as F.
+$('#sync-f-row').on('click', '.sync-f-chit', (e) => {
+  const chit = e.currentTarget as HTMLButtonElement;
+  const color = chit.dataset.color as FColor | undefined;
+  if (!color || !(F_COLORS as readonly string[]).includes(color)) return;
+  setFFace(color);
+});
+
+// U= colour row — including the "gravity" chit (slash-through) which
+// reverts to auto-detect-from-gyro behaviour.
+$('#sync-u-row').on('click', '.sync-u-chit', (e) => {
+  const chit = e.currentTarget as HTMLButtonElement;
+  const color = chit.dataset.color as UColor | undefined;
+  if (!color || !(U_COLORS as readonly string[]).includes(color)) return;
+  setUFace(color);
+});
+
+updateSyncFGridSelection();
+updateSyncUGridSelection();
+
+// Reset: tell the cube it's solved AND reset the virtual cube. Captures
+// the previous facelets snapshot for Undo.
+$('#sync-reset-btn').on('click', async () => {
+  if (!conn) return;
+  const before = await captureFaceletsForUndo();
+  try { await conn.sendCommand({ type: 'REQUEST_RESET' }); } catch { /* ignore */ }
   appliedPhysicalMoves = [];
   setTwistyAlg('');
   twistyTracker.alg = '';
   drawAlgInCube();
+  setSyncUndoAvailable(before);
+  // Clear basis so the next gyro event re-detects U if U='gravity'.
+  // User may have re-oriented the cube in their hands before Reset.
+  basis = null;
 });
 
-// Sync Cube: re-read the cube's current facelet state and update the
-// local virtual cube to match. Useful when the virtual cube has drifted
-// out of sync (missed BLE event, fast turn cluster, etc.).
-$('#header-sync-cube').on('click', async () => {
-  const btn = $('#header-sync-cube');
+// Sync: read the cube's current facelet state and align the virtual
+// cube to match. Captures the previous facelets snapshot for Undo.
+$('#sync-sync-btn').on('click', async () => {
   if (!conn || !conn.capabilities.facelets) return;
+  const before = await captureFaceletsForUndo();
   resyncFromNextFacelets = true;
-  btn.text('Syncing…');
   try {
     await conn.sendCommand({ type: 'REQUEST_FACELETS' });
-    setTimeout(() => btn.text('🔄 Sync Cube'), 1200);
+    setSyncUndoAvailable(before);
   } catch {
     resyncFromNextFacelets = false;
-    btn.text('🔄 Sync Cube');
   }
+  // Same re-detect logic as Reset — user likely pressed Sync after
+  // a re-orientation.
+  basis = null;
 });
 
-$('#reset-gyro').on('click', async () => {
-  resetGyroBasis();
+// Undo: restore the captured facelets snapshot. The physical cube's
+// internal reference state cannot be unset, so Undo only affects the
+// virtual cube. After Undo, the snapshot is consumed (one-shot).
+$('#sync-undo-btn').on('click', () => {
+  if (!syncUndoFacelets) return;
+  applyFaceletsSnapshot(syncUndoFacelets);
+  setSyncUndoAvailable(null);
 });
 
-$('#header-reset-gyro').on('click', async () => {
-  resetGyroBasis();
+// Settings-panel Reset State button: same effect as the panel's Reset
+// (REQUEST_RESET + clear virtual). Routes through the panel handler
+// for consistency.
+$('#reset-state').on('click', () => {
+  $('#sync-reset-btn').trigger('click');
 });
 
 function deviceDisconnected() {
@@ -1925,11 +2217,9 @@ function deviceDisconnected() {
   twistyTracker.alg = '';
   fsSetCubeConnected(false);
   releaseWakeLock();
-  $('#reset-gyro').prop('disabled', true);
   $('#reset-state').prop('disabled', true);
   $('#device-info').prop('disabled', true);
-  $('#header-sync-cube').addClass('hidden');
-  updateHeaderResetGyroState();
+  updateHeaderSyncBtnState();
   $('.info input').val('- n/a -');
   setGyroscopeToggleDisabled(false);
   $('#connect').html('Connect');
@@ -2009,15 +2299,13 @@ $('#connect-button').on('click', async () => {
   $('#connect').html('Disconnect');
   $('#bluetooth-indicator').hide();
   $('#battery-indicator').show();
-  $('#reset-gyro').prop('disabled', false);
   $('#reset-state').prop('disabled', false);
   $('#device-info').prop('disabled', false);
-  if (conn?.capabilities.facelets) $('#header-sync-cube').removeClass('hidden');
   $('#alg-input').attr('placeholder', "Enter alg e.g., (R U R' U) (R U2' R')");
   requestWakeLock();
   forceFix = true;
   requestAnimationFrame(amimateCubeOrientation);
-  updateHeaderResetGyroState();
+  updateHeaderSyncBtnState();
 });
 
 var timerState: "IDLE" | "READY" | "RUNNING" | "STOPPED" = "IDLE";
@@ -2696,7 +2984,7 @@ function loadConfiguration() {
 
   applyCubeSizing();
 
-  updateHeaderResetGyroState();
+  updateHeaderSyncBtnState();
 }
 
 // Add event listener for the gyroscope toggle
@@ -2709,7 +2997,7 @@ function applyGyroscopeEnabled(enabled: boolean) {
   sliceOrientation = { ...IDENTITY };
   localStorage.setItem('gyroscope', enabled ? 'enabled' : 'disabled');
   requestAnimationFrame(amimateCubeOrientation);
-  updateHeaderResetGyroState();
+  updateHeaderSyncBtnState();
 }
 
 function setGyroscopeToggleDisabled(disabled: boolean) {

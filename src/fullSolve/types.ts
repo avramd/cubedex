@@ -104,4 +104,14 @@ export interface SolveRecord {
   // r.phases.f1b / r.phases.f2b (cumulative).
   rouxBlock1FirstPairMs?: number;
   rouxBlock2FirstPairMs?: number;
+  // Optional high-resolution gyro orientation samples captured during
+  // recording mode (opt-click on the record button). Flat array of
+  // (t, x, y, z, w) tuples — `t` in ms from recording start, the rest
+  // a raw cube-frame quaternion (BEFORE any axis-swap or basis
+  // transformation, so the captured stream reflects what the smartcube
+  // actually reported). Sample density tiers: full native rate (~30 Hz
+  // — what the cube delivers) for the first 30 s, ~10 Hz to 50 s, ~2 Hz
+  // after. Used downstream for
+  // timing analysis of slice / wide turns.
+  gyroSamples?: number[];
 }

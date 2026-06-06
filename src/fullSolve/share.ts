@@ -8,6 +8,8 @@
 //   Scramble: <space-separated moves>
 //   Solution: <space-separated moves>
 //   Turns: <space-separated decimal seconds>      (optional)
+//   Gyro:  <flat (t,x,y,z,w) tuples space-separated, 5 numbers/sample>
+//                                                  (optional, high-res)
 //
 // Extra trailing lines are tolerated on parse (the user can append
 // their own annotations); CRLF line endings are normalised on parse.
@@ -21,6 +23,16 @@ export interface SolveShare {
   // solution's move sequence. Optional — the receiver can step through
   // the solve with or without timing data.
   turns?: number[];
+  // Flat (t_ms, x, y, z, w) tuples from an opt-click high-res
+  // recording (see SolveRecord.gyroSamples). t in ms from recording
+  // start; x,y,z,w is the raw cube-frame quaternion BEFORE any
+  // axis-swap or basis transformation. Optional.
+  gyroSamples?: number[];
+}
+
+function trimNum(n: number, decimals: number): string {
+  const s = n.toFixed(decimals);
+  return s.replace(/\.?0+$/, '') || '0';
 }
 
 export function formatShareText(share: SolveShare): string {
@@ -32,10 +44,23 @@ export function formatShareText(share: SolveShare): string {
   if (share.turns && share.turns.length > 0) {
     // Three decimal places matches the existing solve-record turns
     // precision; trim trailing zeros so e.g. "1.000" → "1".
-    lines.push('Turns: ' + share.turns.map(t => {
-      const s = t.toFixed(3);
-      return s.replace(/\.?0+$/, '') || '0';
-    }).join(' '));
+    lines.push('Turns: ' + share.turns.map(t => trimNum(t, 3)).join(' '));
+  }
+  if (share.gyroSamples && share.gyroSamples.length >= 5 && share.gyroSamples.length % 5 === 0) {
+    // Compact tuple encoding: integer ms for t, 4 decimal places for
+    // each quaternion component (quat parts are in [-1, 1] so 4dp is
+    // ~10⁻⁴ rad of axis-angle precision — plenty for analysis).
+    const parts: string[] = [];
+    for (let i = 0; i < share.gyroSamples.length; i += 5) {
+      parts.push(
+        String(Math.round(share.gyroSamples[i])),
+        trimNum(share.gyroSamples[i + 1], 4),
+        trimNum(share.gyroSamples[i + 2], 4),
+        trimNum(share.gyroSamples[i + 3], 4),
+        trimNum(share.gyroSamples[i + 4], 4),
+      );
+    }
+    lines.push('Gyro: ' + parts.join(' '));
   }
   return lines.join('\n');
 }
@@ -56,6 +81,16 @@ export function parseShareText(text: string): SolveShare | null {
     const nums = turnsLine.slice('Turns:'.length).trim().split(/\s+/).filter(Boolean);
     const parsed = nums.map(n => Number(n));
     if (parsed.every(n => Number.isFinite(n))) out.turns = parsed;
+  }
+  const gyroLine = lines.find(l => l.startsWith('Gyro:'));
+  if (gyroLine) {
+    const nums = gyroLine.slice('Gyro:'.length).trim().split(/\s+/).filter(Boolean);
+    const parsed = nums.map(n => Number(n));
+    // Drop the whole gyro stream if any token is non-numeric or the
+    // count isn't a multiple of 5 — partial data is worse than none.
+    if (parsed.length >= 5 && parsed.length % 5 === 0 && parsed.every(n => Number.isFinite(n))) {
+      out.gyroSamples = parsed;
+    }
   }
   return out;
 }

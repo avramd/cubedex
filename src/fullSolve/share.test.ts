@@ -20,6 +20,35 @@ describe('formatShareText', () => {
     const out = formatShareText({ scramble: 'R', solution: 'U', turns: [] });
     expect(out).not.toContain('Turns:');
   });
+
+  it('appends a Gyro: line when gyroSamples are provided', () => {
+    const out = formatShareText({
+      scramble: 'R',
+      solution: 'U',
+      // Two samples: (0ms, 0,0,0,1) and (1234ms, 0.7071, 0, 0, 0.7071).
+      gyroSamples: [0, 0, 0, 0, 1, 1234, 0.7071, 0, 0, 0.7071],
+    });
+    expect(out).toContain('Gyro: 0 0 0 0 1 1234 0.7071 0 0 0.7071');
+  });
+
+  it('omits Gyro when the array is empty', () => {
+    const out = formatShareText({ scramble: 'R', solution: 'U', gyroSamples: [] });
+    expect(out).not.toContain('Gyro:');
+  });
+
+  it('omits Gyro when the count is not a multiple of 5', () => {
+    // Defensive — a partial tuple shouldn't be emitted at all.
+    const out = formatShareText({ scramble: 'R', solution: 'U', gyroSamples: [0, 0, 0, 0] });
+    expect(out).not.toContain('Gyro:');
+  });
+
+  it('rounds gyro timestamps to integer ms', () => {
+    const out = formatShareText({
+      scramble: 'R', solution: 'U',
+      gyroSamples: [123.7, 0, 0, 0, 1],
+    });
+    expect(out).toContain('Gyro: 124 0 0 0 1');
+  });
 });
 
 describe('parseShareText', () => {
@@ -70,6 +99,36 @@ describe('parseShareText', () => {
 
   it('drops malformed turns silently', () => {
     const result = parseShareText("🧩 Cubedex solve\nScramble: R\nSolution: U\nTurns: 0.1 bad 1.0");
+    expect(result).toEqual({ scramble: 'R', solution: 'U' });
+  });
+
+  it('round-trips a formatted share WITH gyroSamples', () => {
+    const original = {
+      scramble: 'R',
+      solution: 'U',
+      gyroSamples: [0, 0, 0, 0, 1, 1234, 0.7071, 0, 0, 0.7071],
+    };
+    expect(parseShareText(formatShareText(original))).toEqual(original);
+  });
+
+  it('round-trips turns AND gyroSamples together', () => {
+    const original = {
+      scramble: 'R',
+      solution: 'U',
+      turns: [0.5, 1.0],
+      gyroSamples: [0, 0, 0, 0, 1, 500, 0.1, 0.2, 0.3, 0.9274],
+    };
+    expect(parseShareText(formatShareText(original))).toEqual(original);
+  });
+
+  it('drops malformed gyro silently', () => {
+    const result = parseShareText("🧩 Cubedex solve\nScramble: R\nSolution: U\nGyro: 0 0 0 0 1 bad 0 0 0 1");
+    expect(result).toEqual({ scramble: 'R', solution: 'U' });
+  });
+
+  it('drops gyro when the count is not a multiple of 5', () => {
+    // 6 numbers — partial second tuple. Whole stream dropped.
+    const result = parseShareText("🧩 Cubedex solve\nScramble: R\nSolution: U\nGyro: 0 0 0 0 1 100");
     expect(result).toEqual({ scramble: 'R', solution: 'U' });
   });
 });

@@ -1514,6 +1514,22 @@ let solveStartMs = 0;
 let solveEndMs = 0;
 let pausedAccumMs = 0;      // ms accumulated across pause intervals
 let pauseStartedAtMs = 0;
+// CF-4: Cube-to-host clock offset, computed on the first MOVE event of
+// a solve/recording. The GAN cube reports its own internal
+// `cubeTimestamp` on every MOVE event — much more accurate than
+// `Date.now()` on receive, since BLE batching can jitter host-side
+// receive times by hundreds of ms. The offset is
+//   offset = Date.now()_at_first_move - cubeTimestamp_first_move
+// so for any subsequent move we can compute a host-equivalent time
+// without BLE jitter:
+//   estHostMs = cubeTimestamp + offset
+// and a cumulative-from-solve-start turn value as:
+//   (estHostMs - solveStartMs) / 1000
+// This keeps `solveTurns` entries on a single timeline (cumulative
+// seconds from solve start) AND uses the cube clock for precise inter-
+// move deltas. Falls back to plain Date.now() when cubeTimestamp is
+// null (rare — legacy / BLE-recovered events). Reset by resetSolveState.
+let cubeMsToHostMsOffset: number | null = null;
 // Interactive-pause state. Captured on togglePause→paused and mutated as
 // the user physically reverses / redoes / wanders. Cleared on resume.
 // pauseState.originalMoves is the snapshot of solveMoves at pause entry;
@@ -2236,6 +2252,7 @@ function resetSolveState() {
   }
   pausedAccumMs = 0;
   pauseStartedAtMs = 0;
+  cubeMsToHostMsOffset = null;  // CF-4: re-anchor cube↔host offset on next move
   solveStartMs = 0;
   solveEndMs = 0;
   inspectionStartMs = 0;
@@ -2366,44 +2383,194 @@ function loadExternalSolveAsPaused(share: SolveShare) {
 // this starting state) via min2phase.
 let recordingStartFacelets: string | null = null;
 
+// Debug instrumentation. Single localStorage key holding a flat array
+// of `{ts, event, ...data}` entries. Deliberately NOT forward-compatible:
+// the key is versioned (cubedex_debug_v<N>) so when the schema changes
+// we bump the version, ignore the old data, AND nuke any older
+// cubedex_debug_v* keys at module load — they're NOT part of the
+// current version's age-out cycle, so without this sweep they'd sit
+// orphaned in localStorage forever. Capped at DEBUG_MAX_ENTRIES so the
+// current version can't grow without bound either.
+//
+// Inspect / share from the browser console:
+//   cubedexDebug.get()    — full log
+//   cubedexDebug.copy()   — copies the full log to the clipboard
+//   cubedexDebug.clear()  — wipes the log
+const DEBUG_KEY = 'cubedex_debug_v1';
+const DEBUG_MAX_ENTRIES = 200;
+try {
+  const toRemove: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && /^cubedex_debug_v\d+$/.test(k) && k !== DEBUG_KEY) toRemove.push(k);
+  }
+  for (const k of toRemove) localStorage.removeItem(k);
+} catch { /* localStorage unavailable */ }
+function debugLog(event: string, data?: Record<string, unknown>) {
+  try {
+    const raw = localStorage.getItem(DEBUG_KEY);
+    const arr: unknown[] = raw ? JSON.parse(raw) : [];
+    arr.push({ ts: new Date().toISOString(), event, ...(data ?? {}) });
+    if (arr.length > DEBUG_MAX_ENTRIES) arr.splice(0, arr.length - DEBUG_MAX_ENTRIES);
+    localStorage.setItem(DEBUG_KEY, JSON.stringify(arr));
+  } catch (e) {
+    console.warn('[debug] store write failed', event, e);
+  }
+  if (data !== undefined) console.log('[debug]', event, data);
+  else console.log('[debug]', event);
+}
+if (typeof window !== 'undefined') {
+  (window as unknown as { cubedexDebug: unknown }).cubedexDebug = {
+    get: () => {
+      try { return JSON.parse(localStorage.getItem(DEBUG_KEY) || '[]'); }
+      catch { return []; }
+    },
+    copy: async () => {
+      const raw = localStorage.getItem(DEBUG_KEY) || '[]';
+      try { await navigator.clipboard.writeText(raw); console.log('[debug] copied', raw.length, 'chars'); }
+      catch (e) { console.warn('[debug] copy failed:', e); }
+    },
+    clear: () => { localStorage.removeItem(DEBUG_KEY); console.log('[debug] cleared'); },
+  };
+}
+
+// CF-3: High-res gyro capture. When startRecording is invoked with
+// {highRes: true} (via opt-click on the record button), every gyro
+// event during the recording is sampled into this buffer at a tiered
+// rate: full native rate (~30 Hz, whatever the cube delivers) for the
+// first 30 s, 10 Hz to 50 s, 2 Hz after. The longer full-rate window
+// gives room for the explicit pauses between trial turns needed for
+// slice / wide-turn timing analysis.
+// Layout is a flat number[] of (t_ms, x, y, z, w) tuples; t_ms is
+// milliseconds from recording start, the rest is the raw cube-frame
+// quaternion BEFORE any axis-swap or basis processing — so the buffer
+// reflects what the smartcube reported, leaving downstream analysis
+// free to apply whatever interpretation it needs.
+let gyroRecordBuffer: number[] | null = null;
+let gyroRecordLastSampleMs: number = -Infinity;
+
+function gyroSampleTierIntervalMs(elapsedMs: number): number {
+  if (elapsedMs < 30_000) return 0;        // every event
+  if (elapsedMs < 50_000) return 100;      // 10 Hz
+  return 500;                              // 2 Hz
+}
+
 // Recording can replace any "between things" state — including an
 // active scramble or a done solve — but never interrupt a live solve
 // (inspection / solving / paused) since that would lose the user's
 // in-progress run.
 const RECORD_ALLOWED_MODES: ReadonlySet<Mode> = new Set(['idle', 'scrambling', 'done']);
 
-function startRecording() {
+function startRecording(opts?: { highRes?: boolean }) {
+  // Snapshot relevant state up front so debugLog calls below all see
+  // the same view regardless of any side effects between branches.
+  const debugCtx = {
+    highRes: !!opts?.highRes,
+    mode,
+    prefsEnabled: prefs.enabled,
+    cubeConnected,
+    hasLastPattern: lastPattern !== null,
+    hasMyPattern: myPattern !== null,
+  };
   if (!prefs.enabled) {
+    debugLog('record-start-reject', { ...debugCtx, reason: 'fs-disabled' });
     renderStatus('Enable Full Solve mode to record.');
     return;
   }
-  if (!cubeConnected || !myPattern) {
+  if (!cubeConnected) {
+    debugLog('record-start-reject', { ...debugCtx, reason: 'no-cube' });
     renderStatus('Connect a smart cube before recording.');
     return;
   }
   if (!RECORD_ALLOWED_MODES.has(mode)) {
+    debugLog('record-start-reject', { ...debugCtx, reason: 'mode-not-allowed' });
     renderStatus('Finish or abort the current solve before recording.');
+    return;
+  }
+  // Prefer lastPattern (always-fresh from the tracker's pattern-change
+  // callback) over myPattern (which we apply moves to ourselves — if
+  // any applyMove call silently rejected a token, myPattern drifted
+  // and patternToFacelets can throw on the corrupted state). Fall back
+  // to myPattern if the tracker hasn't reported a pattern yet.
+  const sourcePattern = lastPattern ?? myPattern;
+  const sourceLabel = lastPattern ? 'lastPattern' : (myPattern ? 'myPattern' : 'none');
+  if (!sourcePattern) {
+    debugLog('record-start-reject', { ...debugCtx, reason: 'no-pattern' });
+    renderStatus('Cube state not yet known — turn the cube once and try again.');
     return;
   }
   // Snapshot to a local first — resetSolveState() below clears
   // recordingStartFacelets, so we have to grab the facelets before it
   // and assign after.
   let startFacelets: string;
-  try { startFacelets = patternToFacelets(myPattern); }
-  catch { renderStatus('Could not read cube state to start recording.'); return; }
+  try { startFacelets = patternToFacelets(sourcePattern); }
+  catch (e) {
+    console.warn('[record] patternToFacelets failed at start:', e);
+    // If primary source threw, try the OTHER source as a last resort.
+    // This both rescues the recording AND tells us (via debugLog)
+    // whether the issue is specific to one source or both.
+    const altPattern = lastPattern && sourcePattern === lastPattern ? myPattern : lastPattern;
+    let altOk = false;
+    if (altPattern) {
+      try { startFacelets = patternToFacelets(altPattern); altOk = true; }
+      catch (e2) {
+        debugLog('record-start-fail', {
+          ...debugCtx,
+          source: sourceLabel,
+          primaryError: String(e),
+          altSource: altPattern === lastPattern ? 'lastPattern' : 'myPattern',
+          altError: String(e2),
+        });
+        renderStatus('Could not read cube state to start recording.');
+        return;
+      }
+    } else {
+      debugLog('record-start-fail', {
+        ...debugCtx,
+        source: sourceLabel,
+        primaryError: String(e),
+        altSource: 'none',
+      });
+      renderStatus('Could not read cube state to start recording.');
+      return;
+    }
+    debugLog('record-start-recovered', {
+      ...debugCtx,
+      primarySource: sourceLabel,
+      primaryError: String(e),
+      altSource: altPattern === lastPattern ? 'lastPattern' : 'myPattern',
+    });
+    if (!altOk) return; // satisfies TS that startFacelets is assigned (altOk would be true here)
+  }
+  debugLog('record-start-ok', { ...debugCtx, source: sourceLabel, faceletsLen: startFacelets.length });
   resetSolveState();          // wipe any stale solve data (incl. recordingStartFacelets)
   recordingStartFacelets = startFacelets;
+  // Sync myPattern to the tracker view so move-application during the
+  // recording starts from a known-good baseline (and won't drift away
+  // from the actual cube state across the recording).
+  myPattern = sourcePattern;
   mode = 'recording';
   solveStartMs = Date.now();
   pausedAccumMs = 0;
   solveMoves = [];
   solveTurns = [];
+  // CF-3: arm gyro buffer only on opt-click. Regular ⏺ records moves
+  // + scramble (existing behaviour); opt-⏺ additionally streams gyro
+  // samples via fsOnRawGyro into this buffer.
+  if (opts?.highRes) {
+    gyroRecordBuffer = [];
+    gyroRecordLastSampleMs = -Infinity;
+  } else {
+    gyroRecordBuffer = null;
+  }
   updateRecordButton();
   // Disable the 🔀 new-scramble button so it doesn't blow away the
   // recording mid-capture. Re-enabled in stopRecording / resetSolveState.
   const newScrambleBtn = fsNewScrambleBtnEl();
   if (newScrambleBtn) newScrambleBtn.disabled = true;
-  renderStatus('Recording — click ⏹ to stop.');
+  renderStatus(opts?.highRes
+    ? 'Recording (high-res gyro) — click ⏹ to stop.'
+    : 'Recording — click ⏹ to stop.');
 }
 
 // Wraps min2phase.solve() with a defensive cap on solver effort. The
@@ -2434,12 +2601,14 @@ function stopRecording() {
   if (mode !== 'recording') return;
   if (!recordingStartFacelets) {
     renderStatus('Recording start state was lost — discarded.');
+    gyroRecordBuffer = null;
     resetSolveState();
     return;
   }
   if (solveMoves.length === 0) {
     renderStatus('No moves captured — discarded.');
     recordingStartFacelets = null;
+    gyroRecordBuffer = null;
     resetSolveState();
     updateRecordButton();
     const nb = fsNewScrambleBtnEl(); if (nb) nb.disabled = false;
@@ -2482,6 +2651,13 @@ function stopRecording() {
     // their existing setting.
     twoLookOll: prefs.twoLookOll,
     twoLookPll: prefs.twoLookPll,
+    // CF-3: persist high-res gyro samples if this was an opt-click
+    // recording. Absent when normal-click was used. Empty buffer (cube
+    // didn't send any gyro events between start and stop) is also
+    // dropped so an empty array doesn't bloat the record.
+    ...(gyroRecordBuffer && gyroRecordBuffer.length > 0
+        ? { gyroSamples: gyroRecordBuffer.slice() }
+        : {}),
   };
   history.push(record);
   void saveHistory();
@@ -2489,11 +2665,29 @@ function stopRecording() {
   renderReplayScrambleBtn();
   // Capture the count BEFORE resetSolveState clears solveMoves.
   const recordedCount = record.solution.split(/\s+/).filter(Boolean).length;
+  const gyroSampleCount = record.gyroSamples ? record.gyroSamples.length / 5 : 0;
   recordingStartFacelets = null;
+  gyroRecordBuffer = null;
   resetSolveState();
   updateRecordButton();
   const nb = fsNewScrambleBtnEl(); if (nb) nb.disabled = false;
-  renderStatus(`Recorded ${recordedCount} move${recordedCount === 1 ? '' : 's'}.`);
+  renderStatus(gyroSampleCount > 0
+    ? `Recorded ${recordedCount} move${recordedCount === 1 ? '' : 's'} + ${gyroSampleCount} gyro sample${gyroSampleCount === 1 ? '' : 's'}.`
+    : `Recorded ${recordedCount} move${recordedCount === 1 ? '' : 's'}.`);
+}
+
+// CF-3: called from index.ts's handleGyroEvent for every raw gyro
+// frame. Appends to the high-res buffer when a recording is armed,
+// applying the tiered sampling rate. No-op otherwise — so the hot path
+// during normal solving stays cheap (one mode-check + one null-check).
+export function fsOnRawGyro(quat: { x: number; y: number; z: number; w: number }) {
+  if (mode !== 'recording') return;
+  if (!gyroRecordBuffer) return;
+  const elapsedMs = Date.now() - solveStartMs;
+  const interval = gyroSampleTierIntervalMs(elapsedMs);
+  if (interval > 0 && elapsedMs - gyroRecordLastSampleMs < interval) return;
+  gyroRecordBuffer.push(elapsedMs, quat.x, quat.y, quat.z, quat.w);
+  gyroRecordLastSampleMs = elapsedMs;
 }
 
 function updateRecordButton() {
@@ -2675,7 +2869,7 @@ function startSolving() {
   if (!untimed) startTimerLoop();
 }
 
-function onSolveMove(move: string) {
+function onSolveMove(move: string, cubeTimestamp: number | null) {
   if (mode === 'paused') {
     // While paused, the cube has already been turned (fsOnPhysicalMove
     // applies the move to myPattern regardless of mode). Feed the
@@ -2691,8 +2885,27 @@ function onSolveMove(move: string) {
     renderRetraceHint();
     return;
   }
+  // CF-4: cube clock → host clock → seconds-from-solve-start.
+  // All entries in solveTurns must be on the SAME timeline (cumulative
+  // seconds from solveStartMs) for slice detection's adjacent-pair
+  // gaps to be meaningful. We anchor the cube↔host offset on the
+  // first cube-timestamped move, then express every later move
+  // through that offset so the deltas come from the cube's accurate
+  // internal clock but the values stay on the host's solve-start
+  // timeline.
+  let turnSec: number;
+  if (cubeTimestamp !== null) {
+    if (cubeMsToHostMsOffset === null) {
+      cubeMsToHostMsOffset = Date.now() - cubeTimestamp;
+    }
+    const estHostMs = cubeTimestamp + cubeMsToHostMsOffset;
+    turnSec = (estHostMs - solveStartMs - pausedAccumMs) / 1000;
+  } else {
+    // Rare path: cube didn't report a timestamp for this event.
+    turnSec = (Date.now() - solveStartMs - pausedAccumMs) / 1000;
+  }
   solveMoves.push(move);
-  solveTurns.push((Date.now() - solveStartMs - pausedAccumMs) / 1000);
+  solveTurns.push(turnSec);
   renderSolutionMoves();
 }
 
@@ -4796,24 +5009,32 @@ function renderSolveList() {
     shareBtn.className = iconBtnClass;
     shareBtn.innerHTML = SHARE_OUT_SVG;
     shareBtn.title = hasSolution
-      ? 'Share this solve to clipboard (⌥-click to include per-move timings)'
+      ? 'Share this solve to clipboard (⌥-click to include per-move timings + high-res gyro samples when present)'
       : 'No solution to share';
     shareBtn.disabled = !hasSolution;
     shareBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      // Default omits timings to keep the payload light. Opt-click
-      // (⌥ on Mac, Alt on Windows/Linux) includes them so the
-      // receiver can analyse inter-move pacing.
-      const includeTurns = e.altKey && !!r.turns && r.turns.length > 0;
+      // Default omits timings + gyro to keep the payload light. Opt-click
+      // (⌥ on Mac, Alt on Windows/Linux) includes whatever extra data
+      // the record carries: turns for inter-move pacing, gyroSamples
+      // for high-res orientation analysis (present only on opt-recorded
+      // solves).
+      const includeExtras = e.altKey;
+      const includeTurns = includeExtras && !!r.turns && r.turns.length > 0;
+      const includeGyro = includeExtras && !!r.gyroSamples && r.gyroSamples.length >= 5;
       const share: SolveShare = {
         scramble: r.scramble,
         solution: r.solution!,
         ...(includeTurns ? { turns: Array.from(r.turns!) } : {}),
+        ...(includeGyro ? { gyroSamples: r.gyroSamples!.slice() } : {}),
       };
       try {
         await navigator.clipboard.writeText(formatShareText(share));
-        renderStatus(includeTurns
-          ? 'Share copied with timings — paste it anywhere to send.'
+        const bits: string[] = [];
+        if (includeTurns) bits.push('timings');
+        if (includeGyro) bits.push(`${r.gyroSamples!.length / 5} gyro samples`);
+        renderStatus(bits.length > 0
+          ? `Share copied with ${bits.join(' + ')} — paste it anywhere to send.`
           : 'Share copied — paste it anywhere to send.');
       } catch {
         renderStatus('Clipboard write denied. Allow clipboard access to share.');
@@ -5122,9 +5343,13 @@ function wireEvents() {
     });
   }
 
-  fsRecordBtnEl()?.addEventListener('click', () => {
+  fsRecordBtnEl()?.addEventListener('click', (e: MouseEvent) => {
     if (mode === 'recording') stopRecording();
-    else startRecording();
+    // CF-3: opt/alt-click starts a high-res recording that captures
+    // raw gyro samples (native ~30 Hz for the first 30 s, then 10 Hz
+    // to 50 s, 2 Hz after). Regular click keeps the existing moves-
+    // only flow.
+    else startRecording(e.altKey ? { highRes: true } : undefined);
   });
   // Initial state of the Record button — disabled until cube + FS are
   // both ready. wireEvents runs at init; cube-connected / FS-enabled
@@ -5832,7 +6057,11 @@ export async function initFullSolve() {
   });
 }
 
-export function fsOnPhysicalMove(move: string) {
+// CF-4: cubeTimestamp is the cube's own internal clock from the MOVE
+// event (in ms). May be null for legacy / BLE-recovered events; when
+// null, onSolveMove falls back to host time. Threaded through from
+// processMoveEvent in src/index.ts.
+export function fsOnPhysicalMove(move: string, cubeTimestamp: number | null = null) {
   if (!prefs.enabled) return;
   if (!move) return;
 
@@ -5859,21 +6088,21 @@ export function fsOnPhysicalMove(move: string) {
       inspectionTimeoutHandle = null;
     }
     startSolving();
-    onSolveMove(move);
+    onSolveMove(move, cubeTimestamp);
     if (myFacelets) evaluatePhaseTransitions(myFacelets);
   } else if (mode === 'solving') {
-    onSolveMove(move);
+    onSolveMove(move, cubeTimestamp);
     if (myFacelets) evaluatePhaseTransitions(myFacelets);
   } else if (mode === 'paused') {
     // During pause the timer is frozen but the cube is still being
     // turned — let the pause state machine classify the move (reverse /
     // redo / wayward) and re-render the investigation surface.
-    onSolveMove(move);
+    onSolveMove(move, cubeTimestamp);
   } else if (mode === 'recording') {
     // Free-form recording: append every move with a relative timestamp.
     // No phase tracking; that happens (or doesn't) when the record is
     // optionally transmuted to a real process via the edit dialog.
-    onSolveMove(move);
+    onSolveMove(move, cubeTimestamp);
   }
 }
 
