@@ -2798,17 +2798,28 @@ function gyroAnalyzeApplyOrientation(timeMs: number) {
   if (!r || !r.gyroSamples) return;
   if (!gyroAnalyze.scene) return;
   const samples = r.gyroSamples;
-  // Find the latest sample with t <= timeMs.
+  // CF-debug: gyro-clock offset. Pulled by the user from the 2nd
+  // slider to align cube-rotation rendering with face-flick rendering.
+  // We shift the SAMPLE LOOKUP TIME (not the turn fire time), so the
+  // user can pause right after a slice animation and drag this slider
+  // until the displayed orientation lines up with the slice flick.
+  // negative offset = gyro looks like it happened earlier; positive
+  // = looks like it happened later. Clamped to sample range.
+  let lookupMs = timeMs - gyroAnalyze.offsetMs;
+  const lastTs = samples[samples.length - 5];
+  if (lookupMs < 0) lookupMs = 0;
+  else if (lookupMs > lastTs) lookupMs = lastTs;
+  // Find the latest sample with t <= lookupMs.
   let lo = 0, hi = samples.length / 5 - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (samples[mid * 5] <= timeMs) lo = mid;
+    if (samples[mid * 5] <= lookupMs) lo = mid;
     else hi = mid - 1;
   }
   const i = lo;
   const j = Math.min(i + 1, samples.length / 5 - 1);
   const t0 = samples[i * 5], t1 = samples[j * 5];
-  const a = (i === j || t1 === t0) ? 0 : (timeMs - t0) / (t1 - t0);
+  const a = (i === j || t1 === t0) ? 0 : (lookupMs - t0) / (t1 - t0);
   const qaSwap = gyroAnalyzeAxisSwap(samples[i * 5 + 1], samples[i * 5 + 2], samples[i * 5 + 3], samples[i * 5 + 4]);
   const qbSwap = gyroAnalyzeAxisSwap(samples[j * 5 + 1], samples[j * 5 + 2], samples[j * 5 + 3], samples[j * 5 + 4]);
   _gyroAnalyzeQa.set(qaSwap.x, qaSwap.y, qaSwap.z, qaSwap.w);
@@ -2826,12 +2837,12 @@ function gyroAnalyzeApplyTurnsUpTo(timeMs: number) {
   const r = gyroAnalyze.record;
   if (!r || !r.turns || !r.solution || !gyroAnalyze.player) return;
   const tokens = r.solution.split(/\s+/).filter(Boolean);
-  // Turns are in seconds; offset is ms (slider). Adjusted turn time =
-  // turn[i]*1000 + offset.
-  // Apply each not-yet-applied turn whose adjusted time is <= timeMs.
+  // Turns fire at their nominal solveTurns times. The offset slider
+  // affects gyro lookup, NOT turns — that way the user can lock the
+  // turn timing as ground truth and shift the gyro clock to match.
   for (let i = gyroAnalyze.lastTurnIdx + 1; i < r.turns.length && i < tokens.length; i++) {
-    const adjTimeMs = r.turns[i] * 1000 + gyroAnalyze.offsetMs;
-    if (adjTimeMs > timeMs) break;
+    const turnTimeMs = r.turns[i] * 1000;
+    if (turnTimeMs > timeMs) break;
     try { gyroAnalyze.player.experimentalAddMove(tokens[i], { cancel: false }); } catch { /* ignore unknown */ }
     gyroAnalyze.lastTurnIdx = i;
   }
@@ -2998,17 +3009,16 @@ function wireGyroAnalyzeControls() {
   if (offsetSlider) offsetSlider.addEventListener('input', () => {
     gyroAnalyze.offsetMs = Number(offsetSlider.value);
     if (offsetVal) offsetVal.textContent = `${gyroAnalyze.offsetMs} ms`;
-    // Re-apply turns at new offset.
-    gyroAnalyzeReplayFromZero();
-    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+    // Re-apply orientation at the new offset; turns are locked to
+    // their nominal times so they don't need re-application.
+    gyroAnalyzeApplyOrientation(gyroAnalyze.timeMs);
   });
   const offsetReset = document.getElementById('gyro-analyze-offset-reset');
   if (offsetReset) offsetReset.addEventListener('click', () => {
     gyroAnalyze.offsetMs = 0;
     if (offsetSlider) offsetSlider.value = '0';
     if (offsetVal) offsetVal.textContent = '0 ms';
-    gyroAnalyzeReplayFromZero();
-    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+    gyroAnalyzeApplyOrientation(gyroAnalyze.timeMs);
   });
 }
 

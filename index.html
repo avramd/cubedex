@@ -1012,7 +1012,7 @@
       </div>
       <div class="mt-2">
         <div class="flex items-center justify-between text-xs text-gray-700 dark:text-gray-200 mb-1">
-          <span>Turn-clock offset (relative to gyro clock)</span>
+          <span>Gyro-clock offset (relative to turn clock)</span>
           <span class="flex items-center gap-1">
             <span id="gyro-analyze-offset-val" class="font-mono">0 ms</span>
             <button id="gyro-analyze-offset-reset" class="text-xs px-1 rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600" title="Reset offset to 0">⟲</button>
@@ -1020,9 +1020,11 @@
         </div>
         <input type="range" id="gyro-analyze-offset-slider" class="w-full" min="-1000" max="1000" step="1" value="0" />
         <div class="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
-          Negative = turns fire earlier (before the gyro motion).
-          Positive = turns fire later. Eyeball the alignment between cube
-          face flicks and the gyro re-orientation flicks during playback.
+          Turns are locked to their saved timestamps. This slider shifts
+          the gyro sample lookup: negative = orientation appears earlier
+          (rotation flicks before the slice anim); positive = later.
+          Pause right after a slice completes and drag until the cube's
+          rotation animation lines up with the slice anim.
         </div>
       </div>
     </div>
