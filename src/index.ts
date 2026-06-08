@@ -603,6 +603,13 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     // active.
     fsOnRawGyro(event.quaternion);
     let quat = new THREE.Quaternion(qx, qz, -qy, qw).normalize();
+    // CF-2: stash the swapped quat so the slice buffer can snapshot
+    // it at slice-start and the slice-confirmation handler can read
+    // the value at slice-end. We use the swapped form because basis
+    // and the rest of the scene composition live in the post-swap
+    // TwistyPlayer body frame; mixing frames here would be a bug.
+    if (!lastSwappedGyroQuat) lastSwappedGyroQuat = new THREE.Quaternion();
+    lastSwappedGyroQuat.copy(quat);
     if (!basis) {
       // When U='gravity', re-detect which body face is currently up
       // from this fresh gyro reading and lock the effective U. The
@@ -1445,7 +1452,23 @@ let keepInitialState: boolean = false;
 let previousFacelets: string = '';
 let isBugged = false;
 
-let sliceBuffer: { event: SmartCubeEvent; timer: ReturnType<typeof setTimeout> } | null = null;
+// CF-2: latest swapped gyro quaternion (TwistyPlayer body frame, post
+// axis-swap). Updated on every gyro event. The slice buffer snapshots
+// it at slice-start so we can compute the gyro delta across the slice
+// fingertrick and absorb it into basis on slice confirmation — see
+// the slice-window basis absorption in handleMoveEvent below.
+let lastSwappedGyroQuat: THREE.Quaternion | null = null;
+
+let sliceBuffer: {
+  event: SmartCubeEvent;
+  timer: ReturnType<typeof setTimeout>;
+  // CF-2: gyro snapshot at slice-start. On slice confirmation we
+  // compose basis * gyroAtFirst * gyroAtSecond⁻¹ so the gyro motion
+  // that the cube reports during the fingertrick (which is the same
+  // physical event the slice notation represents) doesn't get
+  // double-counted on top of cubing.js's native slice rotation.
+  gyroAtFirst: THREE.Quaternion | null;
+} | null = null;
 
 type Face = 'U' | 'D' | 'F' | 'B' | 'R' | 'L';
 type FacePerm = Record<Face, Face>;
@@ -1515,10 +1538,25 @@ async function handleMoveEvent(event: SmartCubeEvent) {
     if (sliceBuffer) {
       clearTimeout(sliceBuffer.timer);
       const bufferedEvent = sliceBuffer.event;
+      const gyroAtFirst = sliceBuffer.gyroAtFirst;
       sliceBuffer = null;
       const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
       const sliceMove = getSliceForPair(bufferedMove, moveStr);
       if (sliceMove) {
+        // CF-2: absorb the slice-window gyro delta into basis. The
+        // cube's gyro reports the core-rotation that's intrinsic to
+        // the fingertrick (R'+L produces core motion); cubing.js's
+        // slice notation already includes that same rotation in its
+        // visual. Without this fix the scene picks up both, hence
+        // the long-standing "M' renders as M' + x" bug. Math:
+        //   basis_new = basis_old · q_first · q_second⁻¹
+        // so that basis_new · q_second equals basis_old · q_first —
+        // i.e. the scene's view of orientation doesn't change across
+        // the slice, leaving cubing.js's slice animation as the only
+        // visual rotation.
+        if (basis && gyroAtFirst && lastSwappedGyroQuat) {
+          basis.multiply(gyroAtFirst).multiply(lastSwappedGyroQuat.clone().conjugate());
+        }
         twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
         return processMoveEvent(event, sliceMove, bufferedEvent);
       } else {
@@ -1528,6 +1566,9 @@ async function handleMoveEvent(event: SmartCubeEvent) {
     } else {
       sliceBuffer = {
         event,
+        // CF-2: snapshot the gyro at slice-start. Clone so subsequent
+        // gyro events updating lastSwappedGyroQuat don't mutate this.
+        gyroAtFirst: lastSwappedGyroQuat ? lastSwappedGyroQuat.clone() : null,
         timer: setTimeout(() => {
           if (sliceBuffer) {
             const ev = sliceBuffer.event;
