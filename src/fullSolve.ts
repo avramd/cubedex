@@ -2834,12 +2834,13 @@ function gyroAnalyzeApplyOrientation(timeMs: number) {
 }
 
 function gyroAnalyzeApplyTurnsUpTo(timeMs: number) {
+  // PLAYBACK path. Only fires for turns that have JUST become due
+  // since the last frame, so each turn animates exactly once. The
+  // scrub path (gyroAnalyzeJumpToState) uses a different mechanism
+  // that sets the cube state instantly without animating.
   const r = gyroAnalyze.record;
   if (!r || !r.turns || !r.solution || !gyroAnalyze.player) return;
   const tokens = r.solution.split(/\s+/).filter(Boolean);
-  // Turns fire at their nominal solveTurns times. The offset slider
-  // affects gyro lookup, NOT turns — that way the user can lock the
-  // turn timing as ground truth and shift the gyro clock to match.
   for (let i = gyroAnalyze.lastTurnIdx + 1; i < r.turns.length && i < tokens.length; i++) {
     const turnTimeMs = r.turns[i] * 1000;
     if (turnTimeMs > timeMs) break;
@@ -2848,12 +2849,31 @@ function gyroAnalyzeApplyTurnsUpTo(timeMs: number) {
   }
 }
 
-function gyroAnalyzeReplayFromZero() {
+// SCRUB path. Sets the player's setupAlg to "all turns up to timeMs"
+// and the playback alg to empty, so the cube jumps to the post-state
+// of those turns with no animation. Cubing.js applies setupAlg
+// instantly (it's the "starting position" for playback), so scrubbing
+// no longer re-animates the same turns over and over each tick.
+//
+// On play, we resume from this state via experimentalAddMove for any
+// NEW turns whose nominal time is after the current playback position
+// — see gyroAnalyzeTick.
+function gyroAnalyzeJumpToState(timeMs: number) {
   const r = gyroAnalyze.record;
-  if (!r || !gyroAnalyze.player) return;
-  // Reset alg + state so face turns animate from solved.
-  try { (gyroAnalyze.player as any).alg = ''; } catch { /* ignore */ }
-  gyroAnalyze.lastTurnIdx = -1;
+  if (!r || !r.turns || !r.solution || !gyroAnalyze.player) return;
+  const tokens = r.solution.split(/\s+/).filter(Boolean);
+  const applied: string[] = [];
+  for (let i = 0; i < r.turns.length && i < tokens.length; i++) {
+    if (r.turns[i] * 1000 > timeMs) break;
+    applied.push(tokens[i]);
+  }
+  gyroAnalyze.lastTurnIdx = applied.length - 1;
+  try {
+    (gyroAnalyze.player as { experimentalSetupAlg?: string; alg?: string }).experimentalSetupAlg = applied.join(' ');
+    (gyroAnalyze.player as { experimentalSetupAlg?: string; alg?: string }).alg = '';
+  } catch (e) {
+    debugLog('gyro-analyze-jump-fail', { error: String(e), timeMs, count: applied.length });
+  }
 }
 
 async function ensureGyroAnalyzeScene(): Promise<boolean> {
@@ -2892,7 +2912,7 @@ function gyroAnalyzeTick() {
   if (gyroAnalyze.timeMs >= gyroAnalyze.durationMs) {
     if (gyroAnalyze.loop) {
       gyroAnalyze.timeMs = 0;
-      gyroAnalyzeReplayFromZero();
+      gyroAnalyzeJumpToState(0);
     } else {
       gyroAnalyze.timeMs = gyroAnalyze.durationMs;
       gyroAnalyzePause();
@@ -2917,13 +2937,15 @@ function gyroAnalyzeRenderControls() {
 
 function gyroAnalyzePlay() {
   if (!gyroAnalyze.record) return;
+  // If at end, restart from 0.
+  if (gyroAnalyze.timeMs >= gyroAnalyze.durationMs) gyroAnalyze.timeMs = 0;
+  // Jump to current state instantly so subsequent ticks only animate
+  // NEW turns from here forward.
+  gyroAnalyzeJumpToState(gyroAnalyze.timeMs);
   gyroAnalyze.playing = true;
   gyroAnalyze.lastFrameWallMs = performance.now();
   const btn = document.getElementById('gyro-analyze-play');
   if (btn) btn.textContent = '⏸';
-  gyroAnalyzeReplayFromZero();
-  // If at end, restart from 0.
-  if (gyroAnalyze.timeMs >= gyroAnalyze.durationMs) gyroAnalyze.timeMs = 0;
   gyroAnalyze.rafHandle = requestAnimationFrame(gyroAnalyzeTick);
 }
 
@@ -2975,7 +2997,7 @@ async function openGyroAnalyzeOverlay(record: SolveRecord) {
   }
   const offsetSlider = document.getElementById('gyro-analyze-offset-slider') as HTMLInputElement | null;
   if (offsetSlider) offsetSlider.value = String(gyroAnalyze.offsetMs);
-  gyroAnalyzeReplayFromZero();
+  gyroAnalyzeJumpToState(0);
   gyroAnalyzeApplyOrientation(0);
   gyroAnalyzeRenderControls();
 }
@@ -2998,10 +3020,12 @@ function wireGyroAnalyzeControls() {
   if (loopCb) loopCb.addEventListener('change', () => { gyroAnalyze.loop = loopCb.checked; });
   const timeSlider = document.getElementById('gyro-analyze-time-slider') as HTMLInputElement | null;
   if (timeSlider) timeSlider.addEventListener('input', () => {
+    // Pause playback on scrub so the user can park exactly where they
+    // want without RAF stepping over their position.
+    if (gyroAnalyze.playing) gyroAnalyzePause();
     gyroAnalyze.timeMs = Number(timeSlider.value);
-    gyroAnalyzeReplayFromZero();
+    gyroAnalyzeJumpToState(gyroAnalyze.timeMs);
     gyroAnalyzeApplyOrientation(gyroAnalyze.timeMs);
-    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
     gyroAnalyzeRenderControls();
   });
   const offsetSlider = document.getElementById('gyro-analyze-offset-slider') as HTMLInputElement | null;
