@@ -2935,6 +2935,15 @@ async function openGyroAnalyzeOverlay(record: SolveRecord) {
     turns: record.turns?.length ?? 0,
     solution: record.solution,
   });
+  // CRITICAL: show the overlay BEFORE creating/initializing the
+  // TwistyPlayer. The modal starts with class="hidden" (display:none);
+  // Web Components with no layout box never initialize their WebGL
+  // context, so experimentalCurrentVantages() returns an empty
+  // iterable forever. Make the player visible first, give the browser
+  // a frame to lay it out, THEN init.
+  const overlay = document.getElementById('gyro-analyze-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+  await new Promise(r => requestAnimationFrame(() => r(undefined)));
   await ensureGyroAnalyzePlayer();
   const sceneOk = await ensureGyroAnalyzeScene();
   if (!sceneOk) {
@@ -2958,9 +2967,6 @@ async function openGyroAnalyzeOverlay(record: SolveRecord) {
   gyroAnalyzeReplayFromZero();
   gyroAnalyzeApplyOrientation(0);
   gyroAnalyzeRenderControls();
-  // Show overlay.
-  const overlay = document.getElementById('gyro-analyze-overlay');
-  if (overlay) overlay.classList.remove('hidden');
 }
 
 function closeGyroAnalyzeOverlay() {
