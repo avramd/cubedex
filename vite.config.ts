@@ -12,6 +12,15 @@ const base = stripped.length === 0 ? '/' : '/' + stripped + '/';
 
 export default defineConfig({
   base,
+  // Pin cubedex to port 5173 so IndexedDB (scoped per-origin) doesn't
+  // disappear if another vite project on the same machine grabs the
+  // default port first. strictPort: true means vite will exit with an
+  // error instead of silently falling back to 5174/5175 — your solve
+  // history won't vanish behind your back.
+  server: {
+    port: 5173,
+    strictPort: true,
+  },
   build: {
     chunkSizeWarningLimit: 2048
   },
