@@ -2458,6 +2458,11 @@ if (typeof window !== 'undefined') {
       console.log('[debug] cube label set to', debugCubeLabel || '(none)');
     },
     getCube: () => debugCubeLabel || null,
+    // Surface debugLog so other modules (index.ts) can write the same
+    // store without re-implementing the localStorage plumbing. Named
+    // with a leading underscore so it reads as "internal" to anyone
+    // poking at the console API.
+    _log: (event: string, data?: Record<string, unknown>) => debugLog(event, data),
   };
 }
 

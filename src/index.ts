@@ -610,6 +610,21 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     // TwistyPlayer body frame; mixing frames here would be a bug.
     if (!lastSwappedGyroQuat) lastSwappedGyroQuat = new THREE.Quaternion();
     lastSwappedGyroQuat.copy(quat);
+    // CF-2: continuous slice absorption. While the absorption window
+    // is open, rewrite basis so the scene composition is pinned to
+    // the slice-start pose regardless of what gyro reports during
+    // the window. See the SLICE_ABSORPTION_WINDOW_MS comment above
+    // for the math. Window auto-expires after the fingertrick's gyro
+    // trail dies down; after that, gyro composes normally again.
+    if (sliceAbsorption && basis) {
+      if (Date.now() <= sliceAbsorption.expiresAt) {
+        basis.copy(sliceAbsorption.basisAtStart)
+          .multiply(sliceAbsorption.gyroAtFirst)
+          .multiply(lastSwappedGyroQuat.clone().conjugate());
+      } else {
+        sliceAbsorption = null;
+      }
+    }
     if (!basis) {
       // When U='gravity', re-detect which body face is currently up
       // from this fresh gyro reading and lock the effective U. The
@@ -1459,6 +1474,41 @@ let isBugged = false;
 // the slice-window basis absorption in handleMoveEvent below.
 let lastSwappedGyroQuat: THREE.Quaternion | null = null;
 
+// CF-2: continuous-absorption window. Set at slice confirmation, read
+// on every subsequent gyro event for SLICE_ABSORPTION_WINDOW_MS. While
+// active, basis is rewritten each gyro tick to
+//   basis = basisAtStart · gyroAtFirst · q_now⁻¹
+// so the scene composition becomes
+//   ... · basisAtStart · gyroAtFirst · q_now⁻¹ · q_now
+//   = ... · basisAtStart · gyroAtFirst
+// which is identically the scene state at slice-start. The user sees
+// no orientation change from gyro across the window — only cubing.js's
+// native slice animation. Why a window vs. a one-shot fold: at slice
+// confirmation the gyro frequently HASN'T yet reported the fingertrick's
+// rotation (GAN ~17–33 Hz native rate vs. 30–80 ms fingertrick), so a
+// snapshot taken right then captures zero motion. Holding the window
+// open lets late-arriving gyro samples roll through the absorption
+// formula and get cancelled out as they come in.
+// First empirical pass at 250ms: per-slice drift of 15–30° leaked
+// through (user reported "after several M'-slices, the cube has
+// effectively completed an x rotation"). Diagnosis: GAN gyro at
+// 17–33 Hz + BLE batching means the slice's gyro trail keeps
+// reporting for several samples after the face-event pair arrives —
+// gyro motion that lands AFTER the window closes composes against
+// the now-frozen basis and shows up as residual cube rotation.
+// 600ms covers the typical post-slice gyro settling time without
+// noticeably damping legitimate hand-rotation reactions between
+// turns. If drift persists with this window, the next step is
+// axis-aware absorption (project gyro delta onto the slice's
+// rotation axis and absorb only that component, letting
+// perpendicular hand motion through).
+const SLICE_ABSORPTION_WINDOW_MS = 600;
+let sliceAbsorption: {
+  basisAtStart: THREE.Quaternion;
+  gyroAtFirst: THREE.Quaternion;
+  expiresAt: number;
+} | null = null;
+
 let sliceBuffer: {
   event: SmartCubeEvent;
   timer: ReturnType<typeof setTimeout>;
@@ -1554,8 +1604,25 @@ async function handleMoveEvent(event: SmartCubeEvent) {
         // i.e. the scene's view of orientation doesn't change across
         // the slice, leaving cubing.js's slice animation as the only
         // visual rotation.
-        if (basis && gyroAtFirst && lastSwappedGyroQuat) {
-          basis.multiply(gyroAtFirst).multiply(lastSwappedGyroQuat.clone().conjugate());
+        if (basis && gyroAtFirst) {
+          // Open the continuous-absorption window. basisAtStart is
+          // captured NOW (after any prior window's effects on basis
+          // are already baked in), and gyroAtFirst is the gyro snapshot
+          // from the slice-buffer creation moment. handleGyroEvent
+          // uses both to pin the scene each gyro tick until the
+          // window expires — see SLICE_ABSORPTION_WINDOW_MS at the
+          // top of this section for why a one-shot fold at this point
+          // doesn't work (gyro hasn't reported the rotation yet).
+          sliceAbsorption = {
+            basisAtStart: basis.clone(),
+            gyroAtFirst: gyroAtFirst.clone(),
+            expiresAt: Date.now() + SLICE_ABSORPTION_WINDOW_MS,
+          };
+          (window as unknown as { cubedexDebug?: { _log?: (e: string, d: unknown) => void } }).cubedexDebug?._log?.('slice-absorb-open', {
+            slice: sliceMove,
+            windowMs: SLICE_ABSORPTION_WINDOW_MS,
+            gyroAtFirst: [gyroAtFirst.x.toFixed(4), gyroAtFirst.y.toFixed(4), gyroAtFirst.z.toFixed(4), gyroAtFirst.w.toFixed(4)],
+          });
         }
         twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
         return processMoveEvent(event, sliceMove, bufferedEvent);
