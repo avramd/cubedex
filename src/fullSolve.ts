@@ -2398,6 +2398,16 @@ let recordingStartFacelets: string | null = null;
 //   cubedexDebug.clear()  — wipes the log
 const DEBUG_KEY = 'cubedex_debug_v1';
 const DEBUG_MAX_ENTRIES = 200;
+// Cube-model label — user-set via cubedexDebug.setCube('GAN i4') etc.
+// Included in every debugLog entry so we can attribute model-specific
+// quirks (slice detection, gyro rate, event timing) to the right cube.
+// Persists across reloads in its own localStorage key so the user
+// doesn't have to relabel every session.
+const DEBUG_CUBE_LABEL_KEY = 'cubedex_debug_cube_label';
+let debugCubeLabel: string = (() => {
+  try { return localStorage.getItem(DEBUG_CUBE_LABEL_KEY) || ''; }
+  catch { return ''; }
+})();
 try {
   const toRemove: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
@@ -2410,7 +2420,13 @@ function debugLog(event: string, data?: Record<string, unknown>) {
   try {
     const raw = localStorage.getItem(DEBUG_KEY);
     const arr: unknown[] = raw ? JSON.parse(raw) : [];
-    arr.push({ ts: new Date().toISOString(), event, ...(data ?? {}) });
+    const entry: Record<string, unknown> = {
+      ts: new Date().toISOString(),
+      event,
+      ...(data ?? {}),
+    };
+    if (debugCubeLabel) entry.cube = debugCubeLabel;
+    arr.push(entry);
     if (arr.length > DEBUG_MAX_ENTRIES) arr.splice(0, arr.length - DEBUG_MAX_ENTRIES);
     localStorage.setItem(DEBUG_KEY, JSON.stringify(arr));
   } catch (e) {
@@ -2431,16 +2447,26 @@ if (typeof window !== 'undefined') {
       catch (e) { console.warn('[debug] copy failed:', e); }
     },
     clear: () => { localStorage.removeItem(DEBUG_KEY); console.log('[debug] cleared'); },
+    setCube: (label: string) => {
+      debugCubeLabel = String(label || '');
+      try {
+        if (debugCubeLabel) localStorage.setItem(DEBUG_CUBE_LABEL_KEY, debugCubeLabel);
+        else localStorage.removeItem(DEBUG_CUBE_LABEL_KEY);
+      } catch { /* ignore */ }
+      console.log('[debug] cube label set to', debugCubeLabel || '(none)');
+    },
+    getCube: () => debugCubeLabel || null,
   };
 }
 
-// CF-3: High-res gyro capture. When startRecording is invoked with
-// {highRes: true} (via opt-click on the record button), every gyro
-// event during the recording is sampled into this buffer at a tiered
-// rate: full native rate (~30 Hz, whatever the cube delivers) for the
-// first 30 s, 10 Hz to 50 s, 2 Hz after. The longer full-rate window
-// gives room for the explicit pauses between trial turns needed for
-// slice / wide-turn timing analysis.
+// CF-3 (debug mode): High-res gyro capture. When startRecording is
+// invoked with {highRes: true} (via opt-click on the record button),
+// EVERY gyro event the cube delivers is sampled into this buffer with
+// NO throttling, for as long as the recording lasts. The tier system
+// is temporarily disabled (returns 0 always) while we investigate
+// slice/gyro timing — the user needs full-density data to eyeball the
+// gyro↔turn clock relationship in the analysis UI. Re-enable tiers
+// later once the timing model is settled.
 // Layout is a flat number[] of (t_ms, x, y, z, w) tuples; t_ms is
 // milliseconds from recording start, the rest is the raw cube-frame
 // quaternion BEFORE any axis-swap or basis processing — so the buffer
@@ -2449,10 +2475,8 @@ if (typeof window !== 'undefined') {
 let gyroRecordBuffer: number[] | null = null;
 let gyroRecordLastSampleMs: number = -Infinity;
 
-function gyroSampleTierIntervalMs(elapsedMs: number): number {
-  if (elapsedMs < 30_000) return 0;        // every event
-  if (elapsedMs < 50_000) return 100;      // 10 Hz
-  return 500;                              // 2 Hz
+function gyroSampleTierIntervalMs(_elapsedMs: number): number {
+  return 0;  // no throttling — capture every cube-reported event
 }
 
 // Recording can replace any "between things" state — including an
@@ -2702,6 +2726,263 @@ function updateRecordButton() {
     btn.title = 'Record an algorithm from your cube. Captures moves until you click stop.';
     btn.disabled = !RECORD_ALLOWED_MODES.has(mode) || !cubeConnected || !prefs.enabled;
   }
+}
+
+// ---------- Gyro / turn timing analyzer (CF-debug) -----------------
+//
+// Modal overlay that plays back the high-res gyro stream of a single
+// recording, driving a dedicated TwistyPlayer's orientation from the
+// raw quaternions and animating the move events at their recorded
+// timestamps + a user-tunable offset. Loop checkbox, time scrub
+// slider, offset slider. Designed for eyeballing whether the gyro
+// clock can be aligned to the turn clock at all — if any single
+// offset makes ALL turns line up with the gyro reorientations, we
+// have a usable model; if different offsets fit different turns, the
+// gyro timing is unreliable and we know to stop trying.
+
+interface GyroAnalyzeState {
+  record: SolveRecord | null;
+  player: any | null;          // TwistyPlayer (lazy)
+  scene: any | null;            // three.js scene
+  vantage: any | null;
+  rafHandle: number;
+  playing: boolean;
+  loop: boolean;
+  timeMs: number;               // current playback position
+  lastFrameWallMs: number;
+  offsetMs: number;             // turn-clock offset (UI slider)
+  lastTurnIdx: number;          // last applied turn index
+  durationMs: number;
+}
+
+const gyroAnalyze: GyroAnalyzeState = {
+  record: null, player: null, scene: null, vantage: null,
+  rafHandle: 0, playing: false, loop: false,
+  timeMs: 0, lastFrameWallMs: 0, offsetMs: 0, lastTurnIdx: -1, durationMs: 0,
+};
+
+async function ensureGyroAnalyzePlayer(): Promise<void> {
+  if (gyroAnalyze.player) return;
+  // Dynamic import so we don't bloat the main bundle if the user never
+  // opens the analyzer.
+  const { TwistyPlayer } = await import('cubing/twisty');
+  const player = new TwistyPlayer({
+    puzzle: '3x3x3',
+    visualization: 'PG3D',
+    alg: '',
+    experimentalSetupAnchor: 'start',
+    background: 'none',
+    controlPanel: 'none',
+    viewerLink: 'none',
+    hintFacelets: 'floating',
+    cameraLatitude: 0,
+    cameraLongitude: 0,
+    tempoScale: 5,
+  });
+  (player as HTMLElement).style.width = '320px';
+  (player as HTMLElement).style.height = '320px';
+  const mount = document.getElementById('gyro-analyze-cube-mount');
+  if (mount) mount.appendChild(player as HTMLElement);
+  gyroAnalyze.player = player;
+}
+
+function gyroAnalyzeAxisSwap(qx: number, qy: number, qz: number, qw: number): { x: number; y: number; z: number; w: number } {
+  // Same swap as handleGyroEvent: GAN body frame → three.js body frame.
+  return { x: qx, y: qz, z: -qy, w: qw };
+}
+
+function gyroAnalyzeApplyOrientation(timeMs: number) {
+  const r = gyroAnalyze.record;
+  if (!r || !r.gyroSamples || !gyroAnalyze.scene) return;
+  const samples = r.gyroSamples;
+  // Find the latest sample <= timeMs (binary search would be nice; for
+  // ~few thousand samples a linear scan from a hint is fine).
+  let lo = 0, hi = samples.length / 5 - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (samples[mid * 5] <= timeMs) lo = mid;
+    else hi = mid - 1;
+  }
+  const i = lo;
+  const j = Math.min(i + 1, samples.length / 5 - 1);
+  const t0 = samples[i * 5], t1 = samples[j * 5];
+  const a = (i === j || t1 === t0) ? 0 : (timeMs - t0) / (t1 - t0);
+  const qaSwap = gyroAnalyzeAxisSwap(samples[i * 5 + 1], samples[i * 5 + 2], samples[i * 5 + 3], samples[i * 5 + 4]);
+  const qbSwap = gyroAnalyzeAxisSwap(samples[j * 5 + 1], samples[j * 5 + 2], samples[j * 5 + 3], samples[j * 5 + 4]);
+  // Slerp between qa and qb at alpha a.
+  const THREE = (window as any).__cubedexTHREE;
+  if (!THREE) return;
+  const qa = new THREE.Quaternion(qaSwap.x, qaSwap.y, qaSwap.z, qaSwap.w);
+  const qb = new THREE.Quaternion(qbSwap.x, qbSwap.y, qbSwap.z, qbSwap.w);
+  qa.slerp(qb, a);
+  gyroAnalyze.scene.quaternion.copy(qa);
+  gyroAnalyze.vantage?.render?.();
+}
+
+function gyroAnalyzeApplyTurnsUpTo(timeMs: number) {
+  const r = gyroAnalyze.record;
+  if (!r || !r.turns || !r.solution || !gyroAnalyze.player) return;
+  const tokens = r.solution.split(/\s+/).filter(Boolean);
+  // Turns are in seconds; offset is ms (slider). Adjusted turn time =
+  // turn[i]*1000 + offset.
+  // Apply each not-yet-applied turn whose adjusted time is <= timeMs.
+  for (let i = gyroAnalyze.lastTurnIdx + 1; i < r.turns.length && i < tokens.length; i++) {
+    const adjTimeMs = r.turns[i] * 1000 + gyroAnalyze.offsetMs;
+    if (adjTimeMs > timeMs) break;
+    try { gyroAnalyze.player.experimentalAddMove(tokens[i], { cancel: false }); } catch { /* ignore unknown */ }
+    gyroAnalyze.lastTurnIdx = i;
+  }
+}
+
+function gyroAnalyzeReplayFromZero() {
+  const r = gyroAnalyze.record;
+  if (!r || !gyroAnalyze.player) return;
+  // Reset alg + state so face turns animate from solved.
+  try { (gyroAnalyze.player as any).alg = ''; } catch { /* ignore */ }
+  gyroAnalyze.lastTurnIdx = -1;
+}
+
+async function ensureGyroAnalyzeScene() {
+  if (gyroAnalyze.scene && gyroAnalyze.vantage) return;
+  if (!gyroAnalyze.player) return;
+  try {
+    const vantages = await (gyroAnalyze.player as any).experimentalCurrentVantages();
+    const vantage = [...vantages][0];
+    if (!vantage) return;
+    gyroAnalyze.vantage = vantage;
+    gyroAnalyze.scene = await vantage.scene.scene();
+    // Cache THREE on window so gyroAnalyzeApplyOrientation can use it
+    // without another dynamic import.
+    if (!(window as any).__cubedexTHREE) {
+      const THREE = await import('three');
+      (window as any).__cubedexTHREE = THREE;
+    }
+  } catch { /* ignore */ }
+}
+
+function gyroAnalyzeTick() {
+  if (!gyroAnalyze.playing) return;
+  const now = performance.now();
+  const dt = Math.min(50, now - gyroAnalyze.lastFrameWallMs);
+  gyroAnalyze.lastFrameWallMs = now;
+  gyroAnalyze.timeMs += dt;
+  if (gyroAnalyze.timeMs >= gyroAnalyze.durationMs) {
+    if (gyroAnalyze.loop) {
+      gyroAnalyze.timeMs = 0;
+      gyroAnalyzeReplayFromZero();
+    } else {
+      gyroAnalyze.timeMs = gyroAnalyze.durationMs;
+      gyroAnalyzePause();
+    }
+  }
+  gyroAnalyzeApplyOrientation(gyroAnalyze.timeMs);
+  gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+  gyroAnalyzeRenderControls();
+  gyroAnalyze.rafHandle = requestAnimationFrame(gyroAnalyzeTick);
+}
+
+function gyroAnalyzeRenderControls() {
+  const slider = document.getElementById('gyro-analyze-time-slider') as HTMLInputElement | null;
+  const timeVal = document.getElementById('gyro-analyze-time-val');
+  const timeReadout = document.getElementById('gyro-analyze-time');
+  if (slider) slider.value = String(Math.round(gyroAnalyze.timeMs));
+  const sec = (gyroAnalyze.timeMs / 1000).toFixed(3);
+  const dur = (gyroAnalyze.durationMs / 1000).toFixed(3);
+  if (timeVal) timeVal.textContent = `${sec} s`;
+  if (timeReadout) timeReadout.textContent = `${sec} / ${dur} s`;
+}
+
+function gyroAnalyzePlay() {
+  if (!gyroAnalyze.record) return;
+  gyroAnalyze.playing = true;
+  gyroAnalyze.lastFrameWallMs = performance.now();
+  const btn = document.getElementById('gyro-analyze-play');
+  if (btn) btn.textContent = '⏸';
+  gyroAnalyzeReplayFromZero();
+  // If at end, restart from 0.
+  if (gyroAnalyze.timeMs >= gyroAnalyze.durationMs) gyroAnalyze.timeMs = 0;
+  gyroAnalyze.rafHandle = requestAnimationFrame(gyroAnalyzeTick);
+}
+
+function gyroAnalyzePause() {
+  gyroAnalyze.playing = false;
+  cancelAnimationFrame(gyroAnalyze.rafHandle);
+  const btn = document.getElementById('gyro-analyze-play');
+  if (btn) btn.textContent = '▶';
+}
+
+async function openGyroAnalyzeOverlay(record: SolveRecord) {
+  if (!record.gyroSamples || record.gyroSamples.length < 5) return;
+  gyroAnalyze.record = record;
+  gyroAnalyze.timeMs = 0;
+  gyroAnalyze.lastTurnIdx = -1;
+  gyroAnalyze.durationMs = record.gyroSamples[(record.gyroSamples.length / 5 - 1) * 5];
+  await ensureGyroAnalyzePlayer();
+  await ensureGyroAnalyzeScene();
+  // Update info text.
+  const info = document.getElementById('gyro-analyze-info');
+  if (info) {
+    const n = record.gyroSamples.length / 5;
+    const dur = (gyroAnalyze.durationMs / 1000).toFixed(2);
+    info.textContent = `${n} gyro samples over ${dur}s · solution: ${record.solution || '(empty)'}`;
+  }
+  // Configure sliders' max.
+  const slider = document.getElementById('gyro-analyze-time-slider') as HTMLInputElement | null;
+  if (slider) {
+    slider.max = String(Math.round(gyroAnalyze.durationMs));
+    slider.value = '0';
+  }
+  const offsetSlider = document.getElementById('gyro-analyze-offset-slider') as HTMLInputElement | null;
+  if (offsetSlider) offsetSlider.value = String(gyroAnalyze.offsetMs);
+  gyroAnalyzeReplayFromZero();
+  gyroAnalyzeApplyOrientation(0);
+  gyroAnalyzeRenderControls();
+  // Show overlay.
+  const overlay = document.getElementById('gyro-analyze-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+}
+
+function closeGyroAnalyzeOverlay() {
+  gyroAnalyzePause();
+  const overlay = document.getElementById('gyro-analyze-overlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+function wireGyroAnalyzeControls() {
+  const playBtn = document.getElementById('gyro-analyze-play');
+  if (playBtn) playBtn.addEventListener('click', () => {
+    if (gyroAnalyze.playing) gyroAnalyzePause();
+    else gyroAnalyzePlay();
+  });
+  const closeBtn = document.getElementById('gyro-analyze-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeGyroAnalyzeOverlay);
+  const loopCb = document.getElementById('gyro-analyze-loop') as HTMLInputElement | null;
+  if (loopCb) loopCb.addEventListener('change', () => { gyroAnalyze.loop = loopCb.checked; });
+  const timeSlider = document.getElementById('gyro-analyze-time-slider') as HTMLInputElement | null;
+  if (timeSlider) timeSlider.addEventListener('input', () => {
+    gyroAnalyze.timeMs = Number(timeSlider.value);
+    gyroAnalyzeReplayFromZero();
+    gyroAnalyzeApplyOrientation(gyroAnalyze.timeMs);
+    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+    gyroAnalyzeRenderControls();
+  });
+  const offsetSlider = document.getElementById('gyro-analyze-offset-slider') as HTMLInputElement | null;
+  const offsetVal = document.getElementById('gyro-analyze-offset-val');
+  if (offsetSlider) offsetSlider.addEventListener('input', () => {
+    gyroAnalyze.offsetMs = Number(offsetSlider.value);
+    if (offsetVal) offsetVal.textContent = `${gyroAnalyze.offsetMs} ms`;
+    // Re-apply turns at new offset.
+    gyroAnalyzeReplayFromZero();
+    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+  });
+  const offsetReset = document.getElementById('gyro-analyze-offset-reset');
+  if (offsetReset) offsetReset.addEventListener('click', () => {
+    gyroAnalyze.offsetMs = 0;
+    if (offsetSlider) offsetSlider.value = '0';
+    if (offsetVal) offsetVal.textContent = '0 ms';
+    gyroAnalyzeReplayFromZero();
+    gyroAnalyzeApplyTurnsUpTo(gyroAnalyze.timeMs);
+  });
 }
 
 function abortSolve() {
@@ -5042,6 +5323,23 @@ function renderSolveList() {
     });
     actions.appendChild(shareBtn);
 
+    // CF-debug: gyro / turn timing analyzer. Only shown when the
+    // record carries gyroSamples (i.e. it was an opt-recorded
+    // high-res capture). Opens an overlay with a fresh cube driven
+    // by the gyro stream, with sliders for time scrub + turn-clock
+    // offset and a loop checkbox.
+    if (r.gyroSamples && r.gyroSamples.length >= 5) {
+      const analyzeBtn = document.createElement('button');
+      analyzeBtn.className = `${iconBtnClass} text-base`;
+      analyzeBtn.textContent = '🔍';
+      analyzeBtn.title = `Analyze gyro / turn timing (${Math.round(r.gyroSamples.length / 5)} samples)`;
+      analyzeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openGyroAnalyzeOverlay(r);
+      });
+      actions.appendChild(analyzeBtn);
+    }
+
     const copyBtn = document.createElement('button');
     copyBtn.className = `${iconBtnClass} text-base`;
     copyBtn.textContent = COPY_ICON;
@@ -6024,6 +6322,7 @@ export async function initFullSolve() {
   backfillSliceTokens();
   wireEvents();
   wireGraphScrollbarDrag();
+  wireGyroAnalyzeControls();
   applyPrefsToUI();
   // phaseSeq must be initialised BEFORE applyFullSolveMode, since the latter
   // calls renderStatsLegend which builds the per-phase color key from phaseSeq.

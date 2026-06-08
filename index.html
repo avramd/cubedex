@@ -984,6 +984,50 @@
     </div>
   </dialog>
 
+  <!-- CF-debug: gyro/turn timing analysis overlay. Opens from the
+       per-row 🔍 button on records that have gyroSamples. The TwistyPlayer
+       inside is created lazily on first open. -->
+  <div id="gyro-analyze-overlay" class="hidden fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-2xl max-w-3xl w-full max-h-[95vh] overflow-auto p-3">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold text-gray-700 dark:text-gray-200">Gyro / turn analysis</div>
+        <button id="gyro-analyze-close" class="text-2xl leading-none px-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded" title="Close" aria-label="Close">×</button>
+      </div>
+      <div id="gyro-analyze-info" class="text-xs text-gray-500 dark:text-gray-400 mb-2"></div>
+      <div id="gyro-analyze-cube-mount" class="w-full flex justify-center" style="min-height: 240px"></div>
+      <div class="flex items-center gap-3 mt-3">
+        <button id="gyro-analyze-play" class="text-lg leading-none px-2 py-1 rounded bg-blue-500 text-white hover:bg-blue-600" title="Play / pause">▶</button>
+        <label class="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-200">
+          <input type="checkbox" id="gyro-analyze-loop" />
+          Loop
+        </label>
+        <div id="gyro-analyze-time" class="text-xs font-mono text-gray-500 dark:text-gray-400 ml-auto">0.000 / 0.000 s</div>
+      </div>
+      <div class="mt-2">
+        <div class="flex items-center justify-between text-xs text-gray-700 dark:text-gray-200 mb-1">
+          <span>Time scrub</span>
+          <span id="gyro-analyze-time-val" class="font-mono">0.000 s</span>
+        </div>
+        <input type="range" id="gyro-analyze-time-slider" class="w-full" min="0" max="1000" step="1" value="0" />
+      </div>
+      <div class="mt-2">
+        <div class="flex items-center justify-between text-xs text-gray-700 dark:text-gray-200 mb-1">
+          <span>Turn-clock offset (relative to gyro clock)</span>
+          <span class="flex items-center gap-1">
+            <span id="gyro-analyze-offset-val" class="font-mono">0 ms</span>
+            <button id="gyro-analyze-offset-reset" class="text-xs px-1 rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600" title="Reset offset to 0">⟲</button>
+          </span>
+        </div>
+        <input type="range" id="gyro-analyze-offset-slider" class="w-full" min="-1000" max="1000" step="1" value="0" />
+        <div class="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
+          Negative = turns fire earlier (before the gyro motion).
+          Positive = turns fire later. Eyeball the alignment between cube
+          face flicks and the gyro re-orientation flicks during playback.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="/src/index.ts"></script>
 
 </body>
