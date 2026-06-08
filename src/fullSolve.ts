@@ -3,6 +3,8 @@ import min2phase from './lib/min2phase.js';
 import { fixOrientation } from './functions';
 import { cube3x3x3 } from 'cubing/puzzles';
 import { KPattern, KPuzzle } from 'cubing/kpuzzle';
+import { TwistyPlayer } from 'cubing/twisty';
+import * as THREE from 'three';
 import { Chart, registerables } from 'chart.js';
 import { patternToFacelets } from './utils';
 import { COPY_ICON, SHARE_IN_SVG, SHARE_OUT_SVG } from './icons';
@@ -2763,9 +2765,6 @@ const gyroAnalyze: GyroAnalyzeState = {
 
 async function ensureGyroAnalyzePlayer(): Promise<void> {
   if (gyroAnalyze.player) return;
-  // Dynamic import so we don't bloat the main bundle if the user never
-  // opens the analyzer.
-  const { TwistyPlayer } = await import('cubing/twisty');
   const player = new TwistyPlayer({
     puzzle: '3x3x3',
     visualization: 'PG3D',
@@ -2791,12 +2790,15 @@ function gyroAnalyzeAxisSwap(qx: number, qy: number, qz: number, qw: number): { 
   return { x: qx, y: qz, z: -qy, w: qw };
 }
 
+const _gyroAnalyzeQa = new THREE.Quaternion();
+const _gyroAnalyzeQb = new THREE.Quaternion();
+
 function gyroAnalyzeApplyOrientation(timeMs: number) {
   const r = gyroAnalyze.record;
-  if (!r || !r.gyroSamples || !gyroAnalyze.scene) return;
+  if (!r || !r.gyroSamples) return;
+  if (!gyroAnalyze.scene) return;
   const samples = r.gyroSamples;
-  // Find the latest sample <= timeMs (binary search would be nice; for
-  // ~few thousand samples a linear scan from a hint is fine).
+  // Find the latest sample with t <= timeMs.
   let lo = 0, hi = samples.length / 5 - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
@@ -2809,14 +2811,15 @@ function gyroAnalyzeApplyOrientation(timeMs: number) {
   const a = (i === j || t1 === t0) ? 0 : (timeMs - t0) / (t1 - t0);
   const qaSwap = gyroAnalyzeAxisSwap(samples[i * 5 + 1], samples[i * 5 + 2], samples[i * 5 + 3], samples[i * 5 + 4]);
   const qbSwap = gyroAnalyzeAxisSwap(samples[j * 5 + 1], samples[j * 5 + 2], samples[j * 5 + 3], samples[j * 5 + 4]);
-  // Slerp between qa and qb at alpha a.
-  const THREE = (window as any).__cubedexTHREE;
-  if (!THREE) return;
-  const qa = new THREE.Quaternion(qaSwap.x, qaSwap.y, qaSwap.z, qaSwap.w);
-  const qb = new THREE.Quaternion(qbSwap.x, qbSwap.y, qbSwap.z, qbSwap.w);
-  qa.slerp(qb, a);
-  gyroAnalyze.scene.quaternion.copy(qa);
-  gyroAnalyze.vantage?.render?.();
+  _gyroAnalyzeQa.set(qaSwap.x, qaSwap.y, qaSwap.z, qaSwap.w);
+  _gyroAnalyzeQb.set(qbSwap.x, qbSwap.y, qbSwap.z, qbSwap.w);
+  _gyroAnalyzeQa.slerp(_gyroAnalyzeQb, a);
+  try {
+    (gyroAnalyze.scene as { quaternion: THREE.Quaternion }).quaternion.copy(_gyroAnalyzeQa);
+    (gyroAnalyze.vantage as { render?: () => void } | null)?.render?.();
+  } catch (e) {
+    debugLog('gyro-analyze-quat-apply-fail', { error: String(e), sampleIdx: i, timeMs });
+  }
 }
 
 function gyroAnalyzeApplyTurnsUpTo(timeMs: number) {
@@ -2842,22 +2845,31 @@ function gyroAnalyzeReplayFromZero() {
   gyroAnalyze.lastTurnIdx = -1;
 }
 
-async function ensureGyroAnalyzeScene() {
-  if (gyroAnalyze.scene && gyroAnalyze.vantage) return;
-  if (!gyroAnalyze.player) return;
-  try {
-    const vantages = await (gyroAnalyze.player as any).experimentalCurrentVantages();
-    const vantage = [...vantages][0];
-    if (!vantage) return;
-    gyroAnalyze.vantage = vantage;
-    gyroAnalyze.scene = await vantage.scene.scene();
-    // Cache THREE on window so gyroAnalyzeApplyOrientation can use it
-    // without another dynamic import.
-    if (!(window as any).__cubedexTHREE) {
-      const THREE = await import('three');
-      (window as any).__cubedexTHREE = THREE;
+async function ensureGyroAnalyzeScene(): Promise<boolean> {
+  if (gyroAnalyze.scene && gyroAnalyze.vantage) return true;
+  if (!gyroAnalyze.player) return false;
+  // The freshly-created TwistyPlayer needs a couple of animation frames
+  // to mount its internal vantages. Retry with backoff so we don't fail
+  // silently on a transient timing race.
+  const maxAttempts = 40;
+  let lastError = '';
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const vantages = await (gyroAnalyze.player as { experimentalCurrentVantages: () => Promise<Iterable<unknown>> }).experimentalCurrentVantages();
+      const vantage = [...vantages][0] as { scene: { scene: () => Promise<unknown> }; render?: () => void } | undefined;
+      if (vantage) {
+        gyroAnalyze.vantage = vantage;
+        gyroAnalyze.scene = await vantage.scene.scene();
+        debugLog('gyro-analyze-scene-ready', { attempt, sceneType: typeof gyroAnalyze.scene });
+        return true;
+      }
+    } catch (e) {
+      lastError = String(e);
     }
-  } catch { /* ignore */ }
+    await new Promise(r => setTimeout(r, 50));
+  }
+  debugLog('gyro-analyze-scene-fail', { attempts: maxAttempts, lastError });
+  return false;
 }
 
 function gyroAnalyzeTick() {
@@ -2917,8 +2929,17 @@ async function openGyroAnalyzeOverlay(record: SolveRecord) {
   gyroAnalyze.timeMs = 0;
   gyroAnalyze.lastTurnIdx = -1;
   gyroAnalyze.durationMs = record.gyroSamples[(record.gyroSamples.length / 5 - 1) * 5];
+  debugLog('gyro-analyze-open', {
+    samples: record.gyroSamples.length / 5,
+    durationMs: gyroAnalyze.durationMs,
+    turns: record.turns?.length ?? 0,
+    solution: record.solution,
+  });
   await ensureGyroAnalyzePlayer();
-  await ensureGyroAnalyzeScene();
+  const sceneOk = await ensureGyroAnalyzeScene();
+  if (!sceneOk) {
+    console.warn('[gyro-analyze] scene not ready after retries; orientation playback will not work');
+  }
   // Update info text.
   const info = document.getElementById('gyro-analyze-info');
   if (info) {
