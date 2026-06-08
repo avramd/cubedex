@@ -603,28 +603,6 @@ async function handleGyroEvent(event: SmartCubeEvent) {
     // active.
     fsOnRawGyro(event.quaternion);
     let quat = new THREE.Quaternion(qx, qz, -qy, qw).normalize();
-    // CF-2: stash the swapped quat so the slice buffer can snapshot
-    // it at slice-start and the slice-confirmation handler can read
-    // the value at slice-end. We use the swapped form because basis
-    // and the rest of the scene composition live in the post-swap
-    // TwistyPlayer body frame; mixing frames here would be a bug.
-    if (!lastSwappedGyroQuat) lastSwappedGyroQuat = new THREE.Quaternion();
-    lastSwappedGyroQuat.copy(quat);
-    // CF-2: continuous slice absorption. While the absorption window
-    // is open, rewrite basis so the scene composition is pinned to
-    // the slice-start pose regardless of what gyro reports during
-    // the window. See the SLICE_ABSORPTION_WINDOW_MS comment above
-    // for the math. Window auto-expires after the fingertrick's gyro
-    // trail dies down; after that, gyro composes normally again.
-    if (sliceAbsorption && basis) {
-      if (Date.now() <= sliceAbsorption.expiresAt) {
-        basis.copy(sliceAbsorption.basisAtStart)
-          .multiply(sliceAbsorption.gyroAtFirst)
-          .multiply(lastSwappedGyroQuat.clone().conjugate());
-      } else {
-        sliceAbsorption = null;
-      }
-    }
     if (!basis) {
       // When U='gravity', re-detect which body face is currently up
       // from this fresh gyro reading and lock the effective U. The
@@ -1467,57 +1445,9 @@ let keepInitialState: boolean = false;
 let previousFacelets: string = '';
 let isBugged = false;
 
-// CF-2: latest swapped gyro quaternion (TwistyPlayer body frame, post
-// axis-swap). Updated on every gyro event. The slice buffer snapshots
-// it at slice-start so we can compute the gyro delta across the slice
-// fingertrick and absorb it into basis on slice confirmation — see
-// the slice-window basis absorption in handleMoveEvent below.
-let lastSwappedGyroQuat: THREE.Quaternion | null = null;
-
-// CF-2: continuous-absorption window. Set at slice confirmation, read
-// on every subsequent gyro event for SLICE_ABSORPTION_WINDOW_MS. While
-// active, basis is rewritten each gyro tick to
-//   basis = basisAtStart · gyroAtFirst · q_now⁻¹
-// so the scene composition becomes
-//   ... · basisAtStart · gyroAtFirst · q_now⁻¹ · q_now
-//   = ... · basisAtStart · gyroAtFirst
-// which is identically the scene state at slice-start. The user sees
-// no orientation change from gyro across the window — only cubing.js's
-// native slice animation. Why a window vs. a one-shot fold: at slice
-// confirmation the gyro frequently HASN'T yet reported the fingertrick's
-// rotation (GAN ~17–33 Hz native rate vs. 30–80 ms fingertrick), so a
-// snapshot taken right then captures zero motion. Holding the window
-// open lets late-arriving gyro samples roll through the absorption
-// formula and get cancelled out as they come in.
-// First empirical pass at 250ms: per-slice drift of 15–30° leaked
-// through (user reported "after several M'-slices, the cube has
-// effectively completed an x rotation"). Diagnosis: GAN gyro at
-// 17–33 Hz + BLE batching means the slice's gyro trail keeps
-// reporting for several samples after the face-event pair arrives —
-// gyro motion that lands AFTER the window closes composes against
-// the now-frozen basis and shows up as residual cube rotation.
-// 600ms covers the typical post-slice gyro settling time without
-// noticeably damping legitimate hand-rotation reactions between
-// turns. If drift persists with this window, the next step is
-// axis-aware absorption (project gyro delta onto the slice's
-// rotation axis and absorb only that component, letting
-// perpendicular hand motion through).
-const SLICE_ABSORPTION_WINDOW_MS = 600;
-let sliceAbsorption: {
-  basisAtStart: THREE.Quaternion;
-  gyroAtFirst: THREE.Quaternion;
-  expiresAt: number;
-} | null = null;
-
 let sliceBuffer: {
   event: SmartCubeEvent;
   timer: ReturnType<typeof setTimeout>;
-  // CF-2: gyro snapshot at slice-start. On slice confirmation we
-  // compose basis * gyroAtFirst * gyroAtSecond⁻¹ so the gyro motion
-  // that the cube reports during the fingertrick (which is the same
-  // physical event the slice notation represents) doesn't get
-  // double-counted on top of cubing.js's native slice rotation.
-  gyroAtFirst: THREE.Quaternion | null;
 } | null = null;
 
 type Face = 'U' | 'D' | 'F' | 'B' | 'R' | 'L';
@@ -1561,12 +1491,15 @@ const SLICE_ROTATION: Record<string, FacePerm> = {
   "z": ROT_ZI, "z'": ROT_Z,  "z2": ROT_Z2,
 };
 
+// Held at identity now that slice rendering uses the underlying face
+// events rather than the collapsed slice token. The remap chain
+// (this var + remapMoveForPlayer below + the four reset sites) is
+// effectively dead — kept in place so the slice-aware solver in
+// functions.ts can still build up a SLICE_ROTATION-driven orientation
+// for alg parsing, and so future work (wide-slice notation, etc.) has
+// a hook if the player ever needs to be re-oriented out from under
+// the gyro again.
 let sliceOrientation: FacePerm = { ...IDENTITY };
-
-function updateSliceOrientation(sliceMove: string) {
-  const rot = SLICE_ROTATION[sliceMove];
-  if (rot) sliceOrientation = composePerm(sliceOrientation, rot);
-}
 
 function remapMoveForPlayer(move: string): string {
   const face = move.charAt(0) as Face;
@@ -1588,42 +1521,10 @@ async function handleMoveEvent(event: SmartCubeEvent) {
     if (sliceBuffer) {
       clearTimeout(sliceBuffer.timer);
       const bufferedEvent = sliceBuffer.event;
-      const gyroAtFirst = sliceBuffer.gyroAtFirst;
       sliceBuffer = null;
       const bufferedMove = bufferedEvent.type === "MOVE" ? bufferedEvent.move : '';
       const sliceMove = getSliceForPair(bufferedMove, moveStr);
       if (sliceMove) {
-        // CF-2: absorb the slice-window gyro delta into basis. The
-        // cube's gyro reports the core-rotation that's intrinsic to
-        // the fingertrick (R'+L produces core motion); cubing.js's
-        // slice notation already includes that same rotation in its
-        // visual. Without this fix the scene picks up both, hence
-        // the long-standing "M' renders as M' + x" bug. Math:
-        //   basis_new = basis_old · q_first · q_second⁻¹
-        // so that basis_new · q_second equals basis_old · q_first —
-        // i.e. the scene's view of orientation doesn't change across
-        // the slice, leaving cubing.js's slice animation as the only
-        // visual rotation.
-        if (basis && gyroAtFirst) {
-          // Open the continuous-absorption window. basisAtStart is
-          // captured NOW (after any prior window's effects on basis
-          // are already baked in), and gyroAtFirst is the gyro snapshot
-          // from the slice-buffer creation moment. handleGyroEvent
-          // uses both to pin the scene each gyro tick until the
-          // window expires — see SLICE_ABSORPTION_WINDOW_MS at the
-          // top of this section for why a one-shot fold at this point
-          // doesn't work (gyro hasn't reported the rotation yet).
-          sliceAbsorption = {
-            basisAtStart: basis.clone(),
-            gyroAtFirst: gyroAtFirst.clone(),
-            expiresAt: Date.now() + SLICE_ABSORPTION_WINDOW_MS,
-          };
-          (window as unknown as { cubedexDebug?: { _log?: (e: string, d: unknown) => void } }).cubedexDebug?._log?.('slice-absorb-open', {
-            slice: sliceMove,
-            windowMs: SLICE_ABSORPTION_WINDOW_MS,
-            gyroAtFirst: [gyroAtFirst.x.toFixed(4), gyroAtFirst.y.toFixed(4), gyroAtFirst.z.toFixed(4), gyroAtFirst.w.toFixed(4)],
-          });
-        }
         twistyTracker.experimentalAddMove(bufferedMove, { cancel: false });
         return processMoveEvent(event, sliceMove, bufferedEvent);
       } else {
@@ -1633,9 +1534,6 @@ async function handleMoveEvent(event: SmartCubeEvent) {
     } else {
       sliceBuffer = {
         event,
-        // CF-2: snapshot the gyro at slice-start. Clone so subsequent
-        // gyro events updating lastSwappedGyroQuat don't mutate this.
-        gyroAtFirst: lastSwappedGyroQuat ? lastSwappedGyroQuat.clone() : null,
         timer: setTimeout(() => {
           if (sliceBuffer) {
             const ev = sliceBuffer.event;
@@ -1668,9 +1566,24 @@ async function processMoveEvent(event: SmartCubeEvent, visualMove?: string, slic
     // as soon as they close replay.
     if (isReplayActive()) return;
 
-    if (visualMove) {
-      updateSliceOrientation(visualMove);
-      enqueueVisualMove(visualMove);
+    if (visualMove && slicePairedFirst && slicePairedFirst.type === 'MOVE') {
+      // Slice path: tracker already has both face events applied (the
+      // first via handleMoveEvent's explicit experimentalAddMove
+      // before this call, the second via the experimentalAddMove
+      // below). Feed the same face events to the visual player —
+      // earlier versions fed the collapsed slice token (e.g. "M'")
+      // here, but cubing.js's M' notation rotates U/D/F/B centers
+      // (they're in the M slice), while the L'+R that physically
+      // happened rotates L and R slices and leaves centers in place.
+      // The cube ONLY ever reports face events, so feeding M' to the
+      // player makes the visual diverge from the tracker — and from
+      // physical reality. The gyro then composes on top of that wrong
+      // visual state, accumulating per-slice drift you can see after
+      // a few fingertricks. visualMove is retained ONLY as the
+      // logical token for the Full Solve solution log and any
+      // slice-stats analysis downstream.
+      enqueueVisualMove(remapMoveForPlayer(slicePairedFirst.move));
+      enqueueVisualMove(remapMoveForPlayer(logicalMove));
     } else {
       enqueueVisualMove(remapMoveForPlayer(logicalMove));
     }
